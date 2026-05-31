@@ -186,10 +186,12 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
 
         let mut total_ok = 0;
         let mut total_err = 0;
+        let mut total_bytes: u64 = 0;
         for h in handles.drain(..) {
-            let (ok, err, _, _) = h.join().unwrap();
+            let (ok, err, size, _) = h.join().unwrap();
             total_ok += ok;
             total_err += err;
+            total_bytes += size as u64;
         }
 
         let elapsed = start.elapsed();
@@ -199,10 +201,15 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
         } else {
             0.0
         };
+        let mb_per_sec = if elapsed.as_secs_f64() > 0.0 {
+            (total_bytes as f64 / 1024.0 / 1024.0) / elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
 
         println!(
-            "  concurrency {:>3}: {:>3} ok, {:>3} err, {:>6.1} blk/s, {:.2}s",
-            conc, total_ok, total_err, blk_per_sec, elapsed.as_secs_f64(),
+            "  concurrency {:>3}: {:>3} ok, {:>3} err, {:>6.1} blk/s, {:.2}s, {:.1} MB/s",
+            conc, total_ok, total_err, blk_per_sec, elapsed.as_secs_f64(), mb_per_sec,
         );
     }
 }
