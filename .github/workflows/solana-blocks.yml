@@ -8,8 +8,6 @@ on:
 jobs:
   discover:
     runs-on: ubuntu-latest
-    outputs:
-      total_blocks: ${{ steps.total.outputs.count }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -18,12 +16,12 @@ jobs:
       - run: cargo run --release discover
         env:
           key_1: ${{ secrets.KEY_1 }}
-      - id: total
-        run: echo "count=$(jq length valid_blocks.json)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
-          name: valid-blocks
-          path: valid_blocks.json
+          name: worker-bundle
+          path: |
+            valid_blocks.json
+            target/release/hello-world
 
   worker:
     needs: discover
@@ -34,14 +32,11 @@ jobs:
       matrix:
         worker: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release
       - uses: actions/download-artifact@v4
         with:
-          name: valid-blocks
-      - run: cargo run --release worker ${{ matrix.worker }} ${{ needs.discover.outputs.total_blocks }}
+          name: worker-bundle
+      - run: chmod +x hello-world
+      - run: ./hello-world worker ${{ matrix.worker }} 20
         env:
           key_1: ${{ secrets.KEY_1 }}
       - name: Upload to release
