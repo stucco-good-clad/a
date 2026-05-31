@@ -15,3 +15,16 @@ jobs:
       - run: cargo run --release
         env:
           key_1: ${{ secrets.KEY_1 }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blocks
+          path: blocks.txt
+
+      - uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          tag_name: blocks-${{ github.run_number }}
+          name: Blocks ${{ github.run_number }}
+          body: "${{ github.run_number }} block dump from commit ${{ github.sha }}"
+          files: blocks.txt
