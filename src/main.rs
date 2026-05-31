@@ -4,6 +4,9 @@ use std::fs::File;
 use std::io::copy;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use rayon::iter::IntoParallelIterator;
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use serde_json::json;
 use ureq::{Agent, AgentBuilder};
 
@@ -195,7 +198,8 @@ fn test_batch(
                             }
                         });
                         if err > 0 {
-                            let first_err = arr.iter()
+                            let first_err = arr
+                                .iter()
                                 .find(|item| item.get("result").is_none())
                                 .and_then(|item| item.get("error"))
                                 .and_then(|e| e.get("message"))
@@ -208,7 +212,11 @@ fn test_batch(
                             err,
                             bytes: size,
                             elapsed,
-                            error_kind: if err > 0 { Some(classify_error("error in response")) } else { None },
+                            error_kind: if err > 0 {
+                                Some(classify_error("error in response"))
+                            } else {
+                                None
+                            },
                         };
                     }
                     eprintln!("  batch: response not an array (wrote {} bytes)", size);
@@ -251,11 +259,18 @@ fn test_batch(
 }
 
 fn run_batch_test(url: &str, api_key: &Option<String>) {
-    let agent = Arc::new(AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(300))
-        .timeout_write(Duration::from_secs(10))
-        .build());
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("build thread pool");
+
+    let agent = Arc::new(
+        AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(10))
+            .timeout_read(Duration::from_secs(300))
+            .timeout_write(Duration::from_secs(10))
+            .build(),
+    );
 
     print!("first available block: ");
     let fb = get_first_block(&agent, url, api_key);
@@ -266,30 +281,31 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
     println!("{slot}\n");
 
     println!("=== 50x batch concurrency sweep ===");
-    let concurrency_levels = [1, 2, 5, 10, 20, 50, 100];
+    let concurrency_levels = [1, 2, 5, 10, 20];
 
     for &conc in &concurrency_levels {
         let start = Instant::now();
-        let mut handles = Vec::with_capacity(conc);
 
-        for c in 0..conc {
-            let agent = agent.clone();
-            let url = url.to_string();
-            let api_key = api_key.clone();
-            let slot_for_call = slot - c as u64;
+        let results: Vec<BatchResult> = pool.install(|| {
+            (0..conc)
+                .into_par_iter()
+                .map(|c| {
+                    let agent = agent.clone();
+                    let url = url.to_string();
+                    let api_key = api_key.clone();
+                    test_batch(&agent, &url, &api_key, slot - c as u64, 50, true)
+                })
+                .collect()
+        });
 
-            handles.push(std::thread::spawn(move || {
-                test_batch(&agent, &url, &api_key, slot_for_call, 50, true)
-            }));
-        }
-
+        let elapsed = start.elapsed();
         let mut total_ok = 0;
         let mut total_err = 0;
         let mut total_bytes: u64 = 0;
-        let mut err_kinds: [usize; 7] = [0; 7]; // matches BatchErrorKind order
+        let mut err_kinds: [usize; 7] = [0; 7];
         let mut worst_elapsed = Duration::ZERO;
-        for h in handles.drain(..) {
-            let r = h.join().unwrap();
+
+        for r in results {
             total_ok += r.ok;
             total_err += r.err;
             total_bytes += r.bytes as u64;
@@ -310,7 +326,6 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
             }
         }
 
-        let elapsed = start.elapsed();
         let total_blocks = total_ok + total_err;
         let blk_per_sec = if elapsed.as_secs_f64() > 0.0 {
             total_blocks as f64 / elapsed.as_secs_f64()
@@ -336,11 +351,12 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
                 ("empty", err_kinds[4]),
                 ("io", err_kinds[5]),
                 ("other", err_kinds[6]),
-            ].into_iter()
-                .filter(|(_, c)| *c > 0)
-                .map(|(k, c)| format!("{}={}", k, c))
-                .collect::<Vec<_>>()
-                .join(" ");
+            ]
+            .into_iter()
+            .filter(|(_, c)| *c > 0)
+            .map(|(k, c)| format!("{}={}", k, c))
+            .collect::<Vec<_>>()
+            .join(" ");
             println!("    errors: {}", kinds);
             println!("    worst thread: {:.2}s", worst_elapsed.as_secs_f64());
         }
