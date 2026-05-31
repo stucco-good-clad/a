@@ -174,10 +174,11 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
 
     println!();
     println!("--- batch getBlock (full transactions) ---");
-    for &n in &[3, 5, 10, 20] {
+    let full_tx_batches = &[3, 5, 10, 20, 30, 50];
+    for &n in full_tx_batches {
         let (ok, err, size, elapsed) = test_batch(&agent, url, api_key, slot, n, true);
         println!(
-            "  {n:4}x: {ok:3} ok, {err:3} err, {:>6} KB, {:.2}s  (check logs for error details)",
+            "  {n:4}x: {ok:3} ok, {err:3} err, {:>6} KB, {:.2}s",
             size / 1024,
             elapsed.as_secs_f64(),
         );
