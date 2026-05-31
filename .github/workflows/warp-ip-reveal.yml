@@ -33,7 +33,7 @@ jobs:
 
       - name: Register WARP
         run: |
-          sudo warp-cli registration new --accept-tos
+          sudo warp-cli --accept-tos registration new
 
       - name: Connect WARP (proxy mode)
         run: |
