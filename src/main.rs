@@ -1,4 +1,6 @@
 use std::env;
+use std::fs::File;
+use std::io::copy;
 use std::time::{Duration, Instant};
 use serde_json::json;
 use ureq::{Agent, AgentBuilder};
@@ -51,6 +53,13 @@ fn get_slot(agent: &Agent, url: &str, api_key: &Option<String>) -> Option<u64> {
     }
 }
 
+fn write_response_to_file(r: ureq::Response, path: &str) -> std::io::Result<u64> {
+    let mut f = File::create(path)?;
+    let mut reader = r.into_reader();
+    let size = copy(&mut reader, &mut f)?;
+    Ok(size)
+}
+
 fn test_batch(
     agent: &Agent,
     url: &str,
@@ -77,16 +86,30 @@ fn test_batch(
     }
 
     let start = Instant::now();
+    let tmp_path = format!("/tmp/batch_{}_{}.json", slot, count);
+    
     match req.send_bytes(body.as_bytes()) {
         Ok(r) => {
-            let text = match read_response(r, "batch") {
-                Some(s) => s,
-                None => return (0, count, 0, start.elapsed()),
+            let write_size = match write_response_to_file(r, &tmp_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("  batch: file write error: {}", e);
+                    return (0, count, 0, start.elapsed());
+                }
             };
             let elapsed = start.elapsed();
+            
+            let text = match std::fs::read_to_string(&tmp_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("  batch: file read error: {}", e);
+                    return (0, count, 0, elapsed);
+                }
+            };
+            
             let size = text.len();
             if text.is_empty() {
-                eprintln!("  batch: empty response");
+                eprintln!("  batch: empty response from {} bytes", write_size);
                 return (0, count, 0, elapsed);
             }
             match serde_json::from_str::<serde_json::Value>(&text) {
@@ -102,9 +125,12 @@ fn test_batch(
                         if err > 0 {
                             eprintln!("  batch errors: {}", err);
                         }
+                        if ok > 0 {
+                            println!("    -> saved to {}", tmp_path);
+                        }
                         return (ok, err, size, elapsed);
                     }
-                    eprintln!("  batch: response not an array");
+                    eprintln!("  batch: response not an array (wrote {} bytes)", size);
                     (0, count, size, elapsed)
                 }
                 Err(e) => {
@@ -124,7 +150,7 @@ fn test_batch(
 fn run_batch_test(url: &str, api_key: &Option<String>) {
     let agent = AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(120))
+        .timeout_read(Duration::from_secs(300))
         .timeout_write(Duration::from_secs(10))
         .build();
 
