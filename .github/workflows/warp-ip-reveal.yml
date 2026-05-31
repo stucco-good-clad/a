@@ -42,13 +42,11 @@ jobs:
 
       - name: Verify WARP status
         run: |
-          sudo warp-cli status || true
-          sudo warp-cli get-accept-dns || true
-          sudo warp-cli mode || true
+          sudo warp-cli --accept-tos status || true
 
       - name: Show IP after WARP
         run: |
           echo "=== IP AFTER WARP ==="
-          curl -s --proxy socks5://127.0.0.1:4000 https://ifconfig.me || true
+          curl -s https://ifconfig.me || true
           echo ""
-          curl -s --proxy socks5://127.0.0.1:4000 https://ipinfo.io/json || true
+          curl -s https://ipinfo.io/json || true
