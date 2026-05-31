@@ -1,6 +1,7 @@
 use std::env;
 use std::fs::File;
 use std::io::copy;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use serde_json::json;
 use ureq::{Agent, AgentBuilder};
@@ -87,7 +88,7 @@ fn test_batch(
 
     let start = Instant::now();
     let tmp_path = format!("/tmp/batch_{}_{}.json", slot, count);
-    
+
     match req.send_bytes(body.as_bytes()) {
         Ok(r) => {
             let write_size = match write_response_to_file(r, &tmp_path) {
@@ -98,7 +99,7 @@ fn test_batch(
                 }
             };
             let elapsed = start.elapsed();
-            
+
             let text = match std::fs::read_to_string(&tmp_path) {
                 Ok(s) => s,
                 Err(e) => {
@@ -106,7 +107,7 @@ fn test_batch(
                     return (0, count, 0, elapsed);
                 }
             };
-            
+
             let size = text.len();
             if text.is_empty() {
                 eprintln!("  batch: empty response from {} bytes", write_size);
@@ -135,7 +136,10 @@ fn test_batch(
                 }
                 Err(e) => {
                     eprintln!("  batch JSON parse error: {}", e);
-                    eprintln!("  response head (first 500 chars):\n{}", &text[..text.len().min(500)]);
+                    eprintln!(
+                        "  response head (first 500 chars):\n{}",
+                        &text[..text.len().min(500)]
+                    );
                     (0, count, size, elapsed)
                 }
             }
@@ -148,11 +152,11 @@ fn test_batch(
 }
 
 fn run_batch_test(url: &str, api_key: &Option<String>) {
-    let agent = AgentBuilder::new()
+    let agent = Arc::new(AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))
         .timeout_read(Duration::from_secs(300))
         .timeout_write(Duration::from_secs(10))
-        .build();
+        .build());
 
     print!("first available block: ");
     let fb = get_first_block(&agent, url, api_key);
@@ -162,14 +166,43 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
     let slot = get_slot(&agent, url, api_key).unwrap_or(0);
     println!("{slot}\n");
 
-    println!();
-    println!("--- batch getBlock (full transactions) ---");
-    for &n in &[50, 100, 200, 300, 400, 500] {
-        let (ok, err, size, elapsed) = test_batch(&agent, url, api_key, slot, n, true);
+    println!("=== 50x batch concurrency sweep ===");
+    let concurrency_levels = [1, 2, 5, 10, 20, 50, 100];
+
+    for &conc in &concurrency_levels {
+        let start = Instant::now();
+        let mut handles = Vec::with_capacity(conc);
+
+        for c in 0..conc {
+            let agent = agent.clone();
+            let url = url.to_string();
+            let api_key = api_key.clone();
+            let slot_for_call = slot - c as u64;
+
+            handles.push(std::thread::spawn(move || {
+                test_batch(&agent, &url, &api_key, slot_for_call, 50, true)
+            }));
+        }
+
+        let mut total_ok = 0;
+        let mut total_err = 0;
+        for h in handles.drain(..) {
+            let (ok, err, _, _) = h.join().unwrap();
+            total_ok += ok;
+            total_err += err;
+        }
+
+        let elapsed = start.elapsed();
+        let total_blocks = total_ok + total_err;
+        let blk_per_sec = if elapsed.as_secs_f64() > 0.0 {
+            total_blocks as f64 / elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+
         println!(
-            "  {n:4}x: {ok:3} ok, {err:3} err, {:>6} KB, {:.2}s",
-            size / 1024,
-            elapsed.as_secs_f64(),
+            "  concurrency {:>3}: {:>3} ok, {:>3} err, {:>6.1} blk/s, {:.2}s",
+            conc, total_ok, total_err, blk_per_sec, elapsed.as_secs_f64(),
         );
     }
 }
