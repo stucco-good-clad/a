@@ -27,7 +27,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y curl gnupg
           curl -fsSL https://pkg.cloudflareclient.com/cloudflare-warp-archive-keyring.gpg | sudo tee /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg >/dev/null
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ any main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
           sudo apt-get update
           sudo apt-get install -y cloudflare-warp
 
