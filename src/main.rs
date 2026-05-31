@@ -1,4 +1,7 @@
 use reqwest::Client;
+use reqwest::ClientBuilder;
+use serde_json::json;
+use serde_json::Value;
 use simd_json::prelude::ValueAsContainer;
 use simd_json::prelude::ValueObjectAccess;
 use simd_json::OwnedValue;
@@ -6,10 +9,6 @@ use std::env;
 use std::fmt;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
-
-use reqwest::ClientBuilder;
-use serde_json::json;
-use serde_json::Value;
 
 #[derive(Clone, Copy)]
 enum BatchErrorKind {
@@ -42,25 +41,6 @@ struct BatchResult {
     bytes: usize,
     elapsed: Duration,
     error_kind: Option<BatchErrorKind>,
-}
-
-fn classify_error(msg: &str) -> BatchErrorKind {
-    let m = msg.to_lowercase();
-    if m.contains("timeout") || m.contains("timed out") {
-        BatchErrorKind::Timeout
-    } else if m.contains("connection") || m.contains("dns") || m.contains("unreachable") {
-        BatchErrorKind::Connection
-    } else if m.contains("status") || m.contains("http") {
-        BatchErrorKind::HttpStatus
-    } else if m.contains("json") || m.contains("parse") {
-        BatchErrorKind::JsonParse
-    } else if m.contains("empty") {
-        BatchErrorKind::Empty
-    } else if m.contains("io") || m.contains("write") || m.contains("read") {
-        BatchErrorKind::Io
-    } else {
-        BatchErrorKind::Other
-    }
 }
 
 fn classify_parse_bytes_error(e: &reqwest::Error) -> BatchErrorKind {
@@ -164,7 +144,7 @@ async fn test_batch(
     }
     let body = match serde_json::to_vec(&batch) {
         Ok(b) => b,
-        Err(e) => {
+        Err(_e) => {
             return BatchResult {
                 ok: 0,
                 err: count,
@@ -222,24 +202,12 @@ async fn test_batch(
     }
 }
 
-async fn run_batch_test(client: Client, url: String, api_key: Option<String>) {
+async fn run_batch_test(client: Client, url: String, api_key: Option<String>, batch_size: usize, max_conc: usize) {
     let fb = get_first_block(&client, &url, &api_key).await;
     println!("first available block: {}", fb.unwrap_or_default());
 
     let slot = get_slot(&client, &url, &api_key).await.unwrap_or(0);
     println!("{slot}\n");
-
-    let args: Vec<String> = env::args().collect();
-    let batch_size = if args.len() > 3 {
-        args[3].parse().unwrap_or(100)
-    } else {
-        100
-    };
-    let max_conc = if args.len() > 4 {
-        args[4].parse().unwrap_or(20)
-    } else {
-        20
-    };
 
     println!("=== {}x batch concurrency sweep up to {} ===", batch_size, max_conc);
 
@@ -254,8 +222,6 @@ async fn run_batch_test(client: Client, url: String, api_key: Option<String>) {
     }
 
     for &conc in &concurrency_levels {
-        let start = Instant::now();
-
         let mut handles: Vec<JoinHandle<BatchResult>> = Vec::with_capacity(conc);
         for job in 0..conc {
             let c = client.clone();
@@ -266,14 +232,13 @@ async fn run_batch_test(client: Client, url: String, api_key: Option<String>) {
             }));
         }
 
+        let start = Instant::now();
         let mut results = Vec::with_capacity(conc);
         for h in handles {
             results.push(h.await);
         }
+        let elapsed = start.elapsed();
 
-        let ok = Instant::now();
-
-        let elapsed = ok.elapsed();
         let mut total_ok = 0;
         let mut total_err = 0;
         let mut total_bytes: u64 = 0;
@@ -345,19 +310,33 @@ async fn run_batch_test(client: Client, url: String, api_key: Option<String>) {
     }
 }
 
+fn usage() -> ! {
+    eprintln!("usage: hello-world batchtest <url> [api_key] [batch_size=100] [max_concurrency=20]");
+    std::process::exit(1);
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
-        eprintln!(
-            "usage: {} batchtest <url> [api_key] [batch_size=100] [max_concurrency=20]",
-            args[0]
-        );
-        std::process::exit(1);
+        usage();
     }
     let mode = &args[1];
     let url = args[2].clone();
-    let api_key = if args.len() > 3 { Some(args[3].clone()) } else { None };
+    let (api_key, batch_size, max_conc) = if args.len() > 3 {
+        let maybe_key = &args[3];
+        if maybe_key.starts_with("http") {
+            (None, 100, 20)
+        } else if args.len() > 4 {
+            let bs = args[4].parse().unwrap_or(100);
+            let mc = if args.len() > 5 { args[5].parse().unwrap_or(20) } else { 20 };
+            (Some(maybe_key.clone()), bs, mc)
+        } else {
+            (Some(maybe_key.clone()), 100, 20)
+        }
+    } else {
+        (None, 100, 20)
+    };
 
     match mode.as_str() {
         "batchtest" => {
@@ -367,11 +346,8 @@ async fn main() {
                 .timeout(Duration::from_secs(60))
                 .build()
                 .expect("build reqwest client");
-            run_batch_test(client, url, api_key).await;
+            run_batch_test(client, url, api_key, batch_size, max_conc).await;
         }
-        _ => {
-            eprintln!("unknown mode: {mode}");
-            std::process::exit(1);
-        }
+        _ => usage(),
     }
 }
