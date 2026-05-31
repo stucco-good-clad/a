@@ -1,16 +1,15 @@
+use reqwest::Client;
 use simd_json::prelude::ValueAsContainer;
 use simd_json::prelude::ValueObjectAccess;
+use simd_json::OwnedValue;
 use std::env;
 use std::fmt;
-use std::io::Read;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use rayon::iter::IntoParallelIterator;
-use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
+use tokio::task::JoinHandle;
+
+use reqwest::ClientBuilder;
 use serde_json::json;
-use simd_json::OwnedValue;
-use ureq::{Agent, AgentBuilder};
+use serde_json::Value;
 
 #[derive(Clone, Copy)]
 enum BatchErrorKind {
@@ -64,28 +63,66 @@ fn classify_error(msg: &str) -> BatchErrorKind {
     }
 }
 
-fn read_response(r: ureq::Response, label: &str) -> Option<String> {
-    match r.into_string() {
-        Ok(s) => Some(s),
-        Err(e) => {
-            eprintln!("  {}: body read error: {}", label, e);
-            None
+fn classify_parse_bytes_error(e: &reqwest::Error) -> BatchErrorKind {
+    if e.is_timeout() {
+        BatchErrorKind::Timeout
+    } else if e.is_connect() || e.is_request() {
+        BatchErrorKind::Connection
+    } else if e.is_decode() || e.is_status() {
+        BatchErrorKind::JsonParse
+    } else {
+        BatchErrorKind::Io
+    }
+}
+
+async fn do_request(client: &Client, url: &str, api_key: &Option<String>, body: Vec<u8>) -> Result<Vec<u8>, reqwest::Error> {
+    let mut req = client.post(url).header("content-type", "application/json");
+    if let Some(k) = api_key {
+        req = req.header("x-api-key", k);
+    }
+    let resp = req.body(body).send().await?;
+    let bytes = resp.bytes().await?;
+    Ok(bytes.to_vec())
+}
+
+fn parse_result_count(buf: &[u8], count: usize) -> (usize, usize) {
+    match simd_json::from_slice::<OwnedValue>(&mut buf.to_vec()) {
+        Ok(v) => {
+            if let Some(arr) = v.as_array() {
+                let (o, e) = arr.iter().fold((0usize, 0usize), |(o, e), item| {
+                    if item.get("result").is_some() { (o + 1, e) } else { (o, e + 1) }
+                });
+                return (o, e);
+            }
+            (0, count)
+        }
+        Err(_) => {
+            match serde_json::from_slice::<Value>(&buf) {
+                Ok(v) => {
+                    if let Some(arr) = v.as_array() {
+                        let (o, e) = arr.iter().fold((0usize, 0usize), |(o, e), item| {
+                            if item.get("result").is_some() { (o + 1, e) } else { (o, e + 1) }
+                        });
+                        return (o, e);
+                    }
+                    (0, count)
+                }
+                Err(e) => {
+                    eprintln!("  batch parse error: {e}");
+                    (0, count)
+                }
+            }
         }
     }
 }
 
-fn get_first_block(agent: &Agent, url: &str, api_key: &Option<String>) -> Option<u64> {
-    let body = br#"{"jsonrpc":"2.0","id":1,"method":"getFirstAvailableBlock","params":[]}"#;
-    let mut req = agent.post(url).set("Content-Type", "application/json");
-    if let Some(k) = api_key {
-        req = req.set("x-api-key", k);
-    }
-    match req.send_bytes(body) {
-        Ok(r) => read_response(r, "first_block").and_then(|text| {
-            serde_json::from_str::<serde_json::Value>(&text)
-                .ok()
-                .and_then(|v| v["result"].as_u64())
-        }),
+async fn get_first_block(client: &Client, url: &str, api_key: &Option<String>) -> Option<u64> {
+    let body = br#"{"jsonrpc":"2.0","id":1,"method":"getFirstAvailableBlock","params":[]}"#.to_vec();
+    match do_request(client, url, api_key, body).await {
+        Ok(buf) => {
+            let v: Value = serde_json::from_slice(&buf).ok()?;
+            v.get("result")?.as_u64()
+        }
         Err(e) => {
             eprintln!("  first block request failed: {e}");
             None
@@ -93,18 +130,13 @@ fn get_first_block(agent: &Agent, url: &str, api_key: &Option<String>) -> Option
     }
 }
 
-fn get_slot(agent: &Agent, url: &str, api_key: &Option<String>) -> Option<u64> {
-    let body = br#"{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}"#;
-    let mut req = agent.post(url).set("Content-Type", "application/json");
-    if let Some(k) = api_key {
-        req = req.set("x-api-key", k);
-    }
-    match req.send_bytes(body) {
-        Ok(r) => read_response(r, "getSlot").and_then(|text| {
-            serde_json::from_str::<serde_json::Value>(&text)
-                .ok()
-                .and_then(|v| v["result"].as_u64())
-        }),
+async fn get_slot(client: &Client, url: &str, api_key: &Option<String>) -> Option<u64> {
+    let body = br#"{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}"#.to_vec();
+    match do_request(client, url, api_key, body).await {
+        Ok(buf) => {
+            let v: Value = serde_json::from_slice(&buf).ok()?;
+            v.get("result")?.as_u64()
+        }
         Err(e) => {
             eprintln!("  getSlot request failed: {e}");
             None
@@ -112,8 +144,8 @@ fn get_slot(agent: &Agent, url: &str, api_key: &Option<String>) -> Option<u64> {
     }
 }
 
-fn test_batch(
-    agent: &Agent,
+async fn test_batch(
+    client: &Client,
     url: &str,
     api_key: &Option<String>,
     slot: u64,
@@ -130,27 +162,22 @@ fn test_batch(
         };
         batch.push(json!({"jsonrpc":"2.0","id":i,"method":"getBlock","params":params}));
     }
-    let body = serde_json::to_string(&batch).unwrap();
-
-    let mut req = agent.post(url).set("Content-Type", "application/json");
-    if let Some(k) = api_key {
-        req = req.set("x-api-key", k);
-    }
+    let body = match serde_json::to_vec(&batch) {
+        Ok(b) => b,
+        Err(e) => {
+            return BatchResult {
+                ok: 0,
+                err: count,
+                bytes: 0,
+                elapsed: Duration::ZERO,
+                error_kind: Some(BatchErrorKind::Io),
+            };
+        }
+    };
 
     let start = Instant::now();
-    match req.send_bytes(body.as_bytes()) {
-        Ok(r) => {
-            let mut buf = Vec::new();
-            if let Err(e) = r.into_reader().read_to_end(&mut buf) {
-                eprintln!("  batch: read error: {}", e);
-                return BatchResult {
-                    ok: 0,
-                    err: count,
-                    bytes: 0,
-                    elapsed: start.elapsed(),
-                    error_kind: Some(BatchErrorKind::Io),
-                };
-            }
+    match do_request(client, url, api_key, body).await {
+        Ok(buf) => {
             let elapsed = start.elapsed();
             let size = buf.len();
 
@@ -165,54 +192,11 @@ fn test_batch(
                 };
             }
 
-            // SIMD-accelerated JSON parse in memory
-            let (ok, err) = match simd_json::from_slice::<OwnedValue>(&mut buf) {
-                Ok(v) => {
-                    if let Some(arr) = v.as_array() {
-                        let (o, e) = arr.iter().fold((0, 0), |(o, e), item| {
-                            if item.get("result").is_some() {
-                                (o + 1, e)
-                            } else {
-                                (o, e + 1)
-                            }
-                        });
-                        (o, e)
-                    } else {
-                        (0, count)
-                    }
-                }
-                Err(_) => {
-                    // Fallback to serde
-                    match serde_json::from_slice::<serde_json::Value>(buf.clone().as_slice()) {
-                        Ok(v) => {
-                            if let Some(arr) = v.as_array() {
-                                let (o, e) = arr.iter().fold((0, 0), |(o, e), item| {
-                                    if item.get("result").is_some() {
-                                        (o + 1, e)
-                                    } else {
-                                        (o, e + 1)
-                                    }
-                                });
-                                (o, e)
-                            } else {
-                                (0, count)
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("  batch parse error: {}", e);
-                            (0, count)
-                        }
-                    }
-                }
-            };
+            let (ok, err) = parse_result_count(&buf, count);
 
             if err > 0 {
                 let text = unsafe { std::str::from_utf8_unchecked(&buf) };
-                let sample = if text.len() > 500 {
-                    &text[..500]
-                } else {
-                    text
-                };
+                let sample = if text.len() > 500 { &text[..500] } else { text };
                 eprintln!("  batch errors: {} (body head: {})", err, sample);
             }
 
@@ -221,15 +205,11 @@ fn test_batch(
                 err,
                 bytes: size,
                 elapsed,
-                error_kind: if err > 0 {
-                    Some(BatchErrorKind::JsonParse)
-                } else {
-                    None
-                },
+                error_kind: if err > 0 { Some(BatchErrorKind::JsonParse) } else { None },
             }
         }
         Err(e) => {
-            let kind = classify_error(&e.to_string());
+            let kind = classify_parse_bytes_error(e);
             eprintln!("  batch request failed: {} [{}]", e, kind);
             BatchResult {
                 ok: 0,
@@ -242,46 +222,27 @@ fn test_batch(
     }
 }
 
-fn run_batch_test(url: &str, api_key: &Option<String>) {
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(4)
-        .build()
-        .expect("build thread pool");
+async fn run_batch_test(client: Client, url: String, api_key: Option<String>) {
+    let fb = get_first_block(&client, &url, &api_key).await;
+    println!("first available block: {}", fb.unwrap_or_default());
 
-    let agent = Arc::new(
-        AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(10))
-            .timeout_read(Duration::from_secs(300))
-            .timeout_write(Duration::from_secs(10))
-            .build(),
-    );
-
-    print!("first available block: ");
-    let fb = get_first_block(&agent, url, api_key);
-    println!("{}", fb.unwrap_or_default());
-
-    print!("current slot: ");
-    let slot = get_slot(&agent, url, api_key).unwrap_or(0);
+    let slot = get_slot(&client, &url, &api_key).await.unwrap_or(0);
     println!("{slot}\n");
 
-    // Detect batch size from CLI arg: batchtest <url> [api_key] [batch_size]
     let args: Vec<String> = env::args().collect();
     let batch_size = if args.len() > 3 {
         args[3].parse().unwrap_or(100)
     } else {
         100
     };
-    // Detect concurrency max from CLI arg: batchtest <url> [api_key] [batch_size] [max_conc]
     let max_conc = if args.len() > 4 {
         args[4].parse().unwrap_or(20)
     } else {
         20
     };
 
-    println!(
-        "=== {}x batch concurrency sweep up to {} === ",
-        batch_size, max_conc
-    );
+    println!("=== {}x batch concurrency sweep up to {} ===", batch_size, max_conc);
+
     let mut concurrency_levels = Vec::new();
     let mut c = 1;
     while c <= max_conc {
@@ -295,19 +256,24 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
     for &conc in &concurrency_levels {
         let start = Instant::now();
 
-        let results: Vec<BatchResult> = pool.install(|| {
-            (0..conc)
-                .into_par_iter()
-                .map(|c| {
-                    let agent = agent.clone();
-                    let url = url.to_string();
-                    let api_key = api_key.clone();
-                    test_batch(&agent, &url, &api_key, slot - c as u64, batch_size, true)
-                })
-                .collect()
-        });
+        let mut handles: Vec<JoinHandle<BatchResult>> = Vec::with_capacity(conc);
+        for job in 0..conc {
+            let c = client.clone();
+            let url = url.clone();
+            let api_key = api_key.clone();
+            handles.push(tokio::spawn(async move {
+                test_batch(&c, &url, &api_key, slot - job as u64, batch_size, true).await
+            }));
+        }
 
-        let elapsed = start.elapsed();
+        let mut results = Vec::with_capacity(conc);
+        for h in handles {
+            results.push(h.await);
+        }
+
+        let ok = Instant::now();
+
+        let elapsed = ok.elapsed();
         let mut total_ok = 0;
         let mut total_err = 0;
         let mut total_bytes: u64 = 0;
@@ -315,6 +281,13 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
         let mut worst_elapsed = Duration::ZERO;
 
         for r in results {
+            let r = match r {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("  task join error: {e}");
+                    continue;
+                }
+            };
             total_ok += r.ok;
             total_err += r.err;
             total_bytes += r.bytes as u64;
@@ -372,24 +345,29 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: {} batchtest <url> [api_key] [batch_size=100] [max_concurrency=20]", args[0]);
+        eprintln!(
+            "usage: {} batchtest <url> [api_key] [batch_size=100] [max_concurrency=20]",
+            args[0]
+        );
         std::process::exit(1);
     }
     let mode = &args[1];
-    let url = &args[2];
-    let api_key = if args.len() > 3 {
-        Some(args[3].clone())
-    } else {
-        None
-    };
+    let url = args[2].clone();
+    let api_key = if args.len() > 3 { Some(args[3].clone()) } else { None };
 
     match mode.as_str() {
         "batchtest" => {
             println!("batch test: {url}");
-            run_batch_test(url, &api_key);
+            let client = ClientBuilder::new()
+                .user_agent("block-bench/1.0")
+                .timeout(Duration::from_secs(60))
+                .build()
+                .expect("build reqwest client");
+            run_batch_test(client, url, api_key).await;
         }
         _ => {
             eprintln!("unknown mode: {mode}");
