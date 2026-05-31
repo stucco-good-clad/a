@@ -124,7 +124,6 @@ fn worker(index: usize, total: usize) {
         return;
     }
 
-    let host = RPC_URLS[index % RPC_URLS.len()];
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))
         .timeout_read(Duration::from_secs(120))
@@ -155,40 +154,45 @@ fn worker(index: usize, total: usize) {
         .to_string()
         .into_bytes();
 
-        let mut succeeded = false;
+        // Rotate through ALL endpoints on retries to evade rate limits
+        let mut last_error = String::from("max retries exhausted");
+        let mut block_json: Option<String> = None;
+
         for attempt in 0..MAX_RETRIES {
+            let host = RPC_URLS[(index + attempt as usize) % RPC_URLS.len()];
             match rpc(&agent, host, &key, &body) {
                 Ok(v) => {
-                    let block_data =
-                        serde_json::to_string(&v["result"]).unwrap_or_default();
-                    if block_data.is_empty() || block_data == "null" {
-                        eprintln!(
-                            "[W{index}] slot {slot}: null result (attempt {})",
-                            attempt + 1
-                        );
-                    } else {
-                        fs::write(&format!("{dir}/block_{slot}.json"), &block_data)
-                            .unwrap();
-                        succeeded = true;
-                        break;
-                    }
+                    // Got a valid response — write it even if result is null
+                    block_json = Some(serde_json::to_string(&v["result"]).unwrap_or_default());
+                    break;
                 }
                 Err(e) => {
-                    let delay_ms = 500 * (1u64 << attempt); // 500ms, 1s, 2s, 4s, 8s
+                    last_error = e;
+                    let delay = Duration::from_secs(1u64 << attempt); // 1s, 2s, 4s, 8s, 16s
                     eprintln!(
-                        "[W{index}] slot {slot}: {e} (attempt {}, retry in {}ms)",
+                        "[W{index}] slot {slot}: {last_error} (attempt {}, {}s)",
                         attempt + 1,
-                        delay_ms
+                        delay.as_secs()
                     );
-                    thread::sleep(Duration::from_millis(delay_ms));
+                    thread::sleep(delay);
                 }
             }
         }
 
-        if succeeded {
-            ok += 1;
-        } else {
-            err += 1;
+        match block_json {
+            Some(data) => {
+                fs::write(&format!("{dir}/block_{slot}.json"), &data).unwrap();
+                if data == "null" {
+                    eprintln!("[W{index}] slot {slot}: null result");
+                }
+                ok += 1;
+            }
+            None => {
+                eprintln!(
+                    "[W{index}] slot {slot}: FAILED after {MAX_RETRIES} attempts: {last_error}"
+                );
+                err += 1;
+            }
         }
 
         if (j + 1) % 100 == 0 || j + 1 == chunk.len() {
