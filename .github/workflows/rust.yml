@@ -13,3 +13,5 @@ jobs:
       - run: rustup update stable && rustup default stable
       - run: cargo build --release
       - run: cargo run --release
+        env:
+          key_1: ${{ secrets.KEY_1 }}
