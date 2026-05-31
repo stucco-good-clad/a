@@ -16,12 +16,13 @@ jobs:
       - run: cargo run --release discover
         env:
           key_1: ${{ secrets.KEY_1 }}
+      - run: cp target/release/hello-world .
       - uses: actions/upload-artifact@v4
         with:
           name: worker-bundle
           path: |
             valid_blocks.json
-            target/release/hello-world
+            hello-world
 
   worker:
     needs: discover
