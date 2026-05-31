@@ -162,20 +162,9 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
     let slot = get_slot(&agent, url, api_key).unwrap_or(0);
     println!("{slot}\n");
 
-    println!("--- batch getBlock (no transactions) ---");
-    for &n in &[10, 20, 50, 100, 200] {
-        let (ok, err, size, elapsed) = test_batch(&agent, url, api_key, slot, n, false);
-        println!(
-            "  {n:4}x: {ok:3} ok, {err:3} err, {:>5} KB, {:.2}s",
-            size / 1024,
-            elapsed.as_secs_f64(),
-        );
-    }
-
     println!();
     println!("--- batch getBlock (full transactions) ---");
-    let full_tx_batches = &[3, 5, 10, 20, 30, 50];
-    for &n in full_tx_batches {
+    for &n in &[30, 50, 75, 100, 150, 200] {
         let (ok, err, size, elapsed) = test_batch(&agent, url, api_key, slot, n, true);
         println!(
             "  {n:4}x: {ok:3} ok, {err:3} err, {:>6} KB, {:.2}s",
