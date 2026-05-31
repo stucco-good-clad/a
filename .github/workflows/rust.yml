@@ -6,13 +6,37 @@ on:
   pull_request:
 
 jobs:
-  build-and-run:
+  ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: System specs
+        run: |
+          echo "=== OS ==="
+          lsb_release -d
+          echo
+          echo "=== CPU ==="
+          lscpu | grep 'Model name' | head -1 | sed 's/Model name:\s*//'
+          nproc
+          echo
+          echo "=== RAM ==="
+          free -h | awk '/^Mem:/ { print $2" total" }'
+          echo
+          echo "=== Disk ==="
+          df -h / | awk 'NR==2 { print $2" total, "$4" free" }'
+      - run: rustup update stable && rustup default stable
+      - run: cargo build --release
+      - run: cargo run --release
+        env:
+          key_1: ${{ secrets.KEY_1 }}
+
+  macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
       - name: System specs
         run: |
-          echo "=== macOS ==="
+          echo "=== OS ==="
           sw_vers
           echo
           echo "=== CPU ==="
