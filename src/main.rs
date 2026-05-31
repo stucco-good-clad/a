@@ -1,10 +1,63 @@
 use std::env;
+use std::fmt;
 use std::fs::File;
 use std::io::copy;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use serde_json::json;
 use ureq::{Agent, AgentBuilder};
+
+#[derive(Clone, Copy)]
+enum BatchErrorKind {
+    Timeout,
+    Connection,
+    HttpStatus,
+    JsonParse,
+    Empty,
+    Io,
+    Other,
+}
+
+impl fmt::Display for BatchErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BatchErrorKind::Timeout => write!(f, "timeout"),
+            BatchErrorKind::Connection => write!(f, "conn"),
+            BatchErrorKind::HttpStatus => write!(f, "http"),
+            BatchErrorKind::JsonParse => write!(f, "json"),
+            BatchErrorKind::Empty => write!(f, "empty"),
+            BatchErrorKind::Io => write!(f, "io"),
+            BatchErrorKind::Other => write!(f, "other"),
+        }
+    }
+}
+
+struct BatchResult {
+    ok: usize,
+    err: usize,
+    bytes: usize,
+    elapsed: Duration,
+    error_kind: Option<BatchErrorKind>,
+}
+
+fn classify_error(msg: &str) -> BatchErrorKind {
+    let m = msg.to_lowercase();
+    if m.contains("timeout") || m.contains("timed out") {
+        BatchErrorKind::Timeout
+    } else if m.contains("connection") || m.contains("dns") || m.contains("unreachable") {
+        BatchErrorKind::Connection
+    } else if m.contains("status") || m.contains("http") {
+        BatchErrorKind::HttpStatus
+    } else if m.contains("json") || m.contains("parse") {
+        BatchErrorKind::JsonParse
+    } else if m.contains("empty") {
+        BatchErrorKind::Empty
+    } else if m.contains("io") || m.contains("write") || m.contains("read") {
+        BatchErrorKind::Io
+    } else {
+        BatchErrorKind::Other
+    }
+}
 
 fn read_response(r: ureq::Response, label: &str) -> Option<String> {
     match r.into_string() {
@@ -68,7 +121,7 @@ fn test_batch(
     slot: u64,
     count: usize,
     full_tx: bool,
-) -> (usize, usize, usize, Duration) {
+) -> BatchResult {
     let mut batch = Vec::with_capacity(count);
     for i in 0..count {
         let b = slot - i as u64;
@@ -95,7 +148,13 @@ fn test_batch(
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("  batch: file write error: {}", e);
-                    return (0, count, 0, start.elapsed());
+                    return BatchResult {
+                        ok: 0,
+                        err: count,
+                        bytes: 0,
+                        elapsed: start.elapsed(),
+                        error_kind: Some(BatchErrorKind::Io),
+                    };
                 }
             };
             let elapsed = start.elapsed();
@@ -104,14 +163,26 @@ fn test_batch(
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("  batch: file read error: {}", e);
-                    return (0, count, 0, elapsed);
+                    return BatchResult {
+                        ok: 0,
+                        err: count,
+                        bytes: 0,
+                        elapsed,
+                        error_kind: Some(BatchErrorKind::Io),
+                    };
                 }
             };
 
             let size = text.len();
             if text.is_empty() {
                 eprintln!("  batch: empty response from {} bytes", write_size);
-                return (0, count, 0, elapsed);
+                return BatchResult {
+                    ok: 0,
+                    err: count,
+                    bytes: 0,
+                    elapsed,
+                    error_kind: Some(BatchErrorKind::Empty),
+                };
             }
             match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(v) => {
@@ -124,15 +195,30 @@ fn test_batch(
                             }
                         });
                         if err > 0 {
-                            eprintln!("  batch errors: {}", err);
+                            let first_err = arr.iter()
+                                .find(|item| item.get("result").is_none())
+                                .and_then(|item| item.get("error"))
+                                .and_then(|e| e.get("message"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("unknown");
+                            eprintln!("  batch errors: {} (sample: {})", err, first_err);
                         }
-                        if ok > 0 {
-                            println!("    -> saved to {}", tmp_path);
-                        }
-                        return (ok, err, size, elapsed);
+                        return BatchResult {
+                            ok,
+                            err,
+                            bytes: size,
+                            elapsed,
+                            error_kind: if err > 0 { Some(classify_error("error in response")) } else { None },
+                        };
                     }
                     eprintln!("  batch: response not an array (wrote {} bytes)", size);
-                    (0, count, size, elapsed)
+                    BatchResult {
+                        ok: 0,
+                        err: count,
+                        bytes: size,
+                        elapsed,
+                        error_kind: Some(BatchErrorKind::JsonParse),
+                    }
                 }
                 Err(e) => {
                     eprintln!("  batch JSON parse error: {}", e);
@@ -140,13 +226,26 @@ fn test_batch(
                         "  response head (first 500 chars):\n{}",
                         &text[..text.len().min(500)]
                     );
-                    (0, count, size, elapsed)
+                    BatchResult {
+                        ok: 0,
+                        err: count,
+                        bytes: size,
+                        elapsed,
+                        error_kind: Some(BatchErrorKind::JsonParse),
+                    }
                 }
             }
         }
         Err(e) => {
-            eprintln!("  batch request failed: {}", e);
-            (0, count, 0, start.elapsed())
+            let kind = classify_error(&e.to_string());
+            eprintln!("  batch request failed: {} [{}]", e, kind);
+            BatchResult {
+                ok: 0,
+                err: count,
+                bytes: 0,
+                elapsed: start.elapsed(),
+                error_kind: Some(kind),
+            }
         }
     }
 }
@@ -187,11 +286,28 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
         let mut total_ok = 0;
         let mut total_err = 0;
         let mut total_bytes: u64 = 0;
+        let mut err_kinds: [usize; 7] = [0; 7]; // matches BatchErrorKind order
+        let mut worst_elapsed = Duration::ZERO;
         for h in handles.drain(..) {
-            let (ok, err, size, _) = h.join().unwrap();
-            total_ok += ok;
-            total_err += err;
-            total_bytes += size as u64;
+            let r = h.join().unwrap();
+            total_ok += r.ok;
+            total_err += r.err;
+            total_bytes += r.bytes as u64;
+            if r.elapsed > worst_elapsed {
+                worst_elapsed = r.elapsed;
+            }
+            if let Some(kind) = r.error_kind {
+                let idx = match kind {
+                    BatchErrorKind::Timeout => 0,
+                    BatchErrorKind::Connection => 1,
+                    BatchErrorKind::HttpStatus => 2,
+                    BatchErrorKind::JsonParse => 3,
+                    BatchErrorKind::Empty => 4,
+                    BatchErrorKind::Io => 5,
+                    BatchErrorKind::Other => 6,
+                };
+                err_kinds[idx] += 1;
+            }
         }
 
         let elapsed = start.elapsed();
@@ -211,6 +327,23 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
             "  concurrency {:>3}: {:>3} ok, {:>3} err, {:>6.1} blk/s, {:.2}s, {:.1} MB/s",
             conc, total_ok, total_err, blk_per_sec, elapsed.as_secs_f64(), mb_per_sec,
         );
+        if total_err > 0 {
+            let kinds = vec![
+                ("timeout", err_kinds[0]),
+                ("conn", err_kinds[1]),
+                ("http", err_kinds[2]),
+                ("json", err_kinds[3]),
+                ("empty", err_kinds[4]),
+                ("io", err_kinds[5]),
+                ("other", err_kinds[6]),
+            ].into_iter()
+                .filter(|(_, c)| *c > 0)
+                .map(|(k, c)| format!("{}={}", k, c))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("    errors: {}", kinds);
+            println!("    worst thread: {:.2}s", worst_elapsed.as_secs_f64());
+        }
     }
 }
 
