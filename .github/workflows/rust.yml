@@ -6,11 +6,21 @@ on:
   pull_request:
 
 jobs:
-  build-and-run:
+  dtolnay:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: rustup update stable && rustup default stable
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: cargo run --release
+        env:
+          key_1: ${{ secrets.KEY_1 }}
+
+  actions-rust-lang:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: cargo build --release
       - run: cargo run --release
         env:
