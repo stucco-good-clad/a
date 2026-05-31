@@ -1,131 +1,145 @@
 use std::env;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
+use serde_json::json;
+use ureq::Agent;
 
-fn test_rate_limit(url: &str, api_key: &Option<String>) {
-    let body = br#"{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}"#;
+fn get_first_block(agent: &Agent, url: &str, api_key: &Option<String>) -> u64 {
+    let body = br#"{"jsonrpc":"2.0","id":1,"method":"getFirstAvailableBlock","params":[]}"#;
+    let mut req = agent.post(url).set("Content-Type", "application/json");
+    if let Some(k) = api_key {
+        req = req.set("x-api-key", k);
+    }
+    match req.send_bytes(body) {
+        Ok(r) => {
+            let text = r.into_string().unwrap_or_default();
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(slot) = v["result"].as_u64() {
+                    return slot;
+                }
+            }
+        }
+        Err(e) => eprintln!("  first block request failed: {e}"),
+    }
+    0
+}
 
-    // First get first available block
-    let fb_body = br#"{"jsonrpc":"2.0","id":1,"method":"getFirstAvailableBlock","params":[]}"#;
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(60))
-        .timeout_write(Duration::from_secs(10))
-        .build();
+fn test_batch(
+    agent: &Agent,
+    url: &str,
+    api_key: &Option<String>,
+    slot: u64,
+    count: usize,
+    full_tx: bool,
+) -> (usize, usize, usize, Duration) {
+    let mut batch = Vec::with_capacity(count);
+    for i in 0..count {
+        let b = slot - i as u64;
+        let params = if full_tx {
+            json!([b, {"encoding": "json", "transactionDetails": "full", "maxSupportedTransactionVersion": 0, "rewards": false}])
+        } else {
+            json!([b, {"encoding": "json", "transactionDetails": "none", "rewards": false}])
+        };
+        batch.push(json!({"jsonrpc":"2.0","id":i,"method":"getBlock","params":params}));
+    }
+    let body = serde_json::to_string(&batch).unwrap();
 
     let mut req = agent.post(url).set("Content-Type", "application/json");
     if let Some(k) = api_key {
         req = req.set("x-api-key", k);
     }
-    match req.send_bytes(fb_body) {
+    let start = Instant::now();
+    match req.send_bytes(body.as_bytes()) {
         Ok(r) => {
             let text = r.into_string().unwrap_or_default();
+            let elapsed = start.elapsed();
+            let size = text.len();
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(slot) = v["result"].as_u64() {
-                    println!("first available block: {slot}");
-                } else if let Some(e) = v["error"].as_object() {
-                    println!("first block error: {} ({})", e["message"], e["code"]);
+                if let Some(arr) = v.as_array() {
+                    let (ok, err) = arr.iter().fold((0, 0), |(o, e), item| {
+                        if item.get("result").is_some() { (o + 1, e) } else { (o, e + 1) }
+                    });
+                    return (ok, err, size, elapsed);
                 }
             }
+            (0, count, size, elapsed)
         }
-        Err(e) => println!("first block request failed: {e}"),
+        Err(e) => {
+            eprintln!("  batch request failed: {e}");
+            (0, count, 0, start.elapsed())
+        }
+    }
+}
+
+fn run_batch_test(url: &str, api_key: &Option<String>) {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(120))
+        .timeout_write(Duration::from_secs(10))
+        .build();
+
+    let fb = get_first_block(&agent, url, api_key);
+    println!("first available block: {fb}");
+
+    // Get current slot
+    let slot_body = br#"{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}"#;
+    let mut req = agent.post(url).set("Content-Type", "application/json");
+    if let Some(k) = api_key {
+        req = req.set("x-api-key", k);
+    }
+    let slot_text = req.send_bytes(slot_body).unwrap().into_string().unwrap();
+    let slot: u64 = serde_json::from_str::<serde_json::Value>(&slot_text)
+        .unwrap()["result"]
+        .as_u64()
+        .unwrap();
+    println!("current slot: {slot}");
+    println!();
+    println!("--- batch getBlock (no transactions) ---");
+
+    for &n in &[10, 20, 50, 100, 200] {
+        let (ok, err, size, elapsed) = test_batch(&agent, url, api_key, slot, n, false);
+        println!(
+            "  {n:4}x: {ok:3} ok, {err:3} err, {:>5} KB, {:.2}s",
+            size / 1024,
+            elapsed.as_secs_f64(),
+        );
     }
 
-    // Test increasing concurrency levels
-    let levels: &[usize] = &[100, 500, 1000, 2000, 5000, 10000];
+    println!();
+    println!("--- batch getBlock (full transactions) ---");
 
-    for &n in levels {
-        let agent = Arc::new(
-            ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(10))
-                .timeout_read(Duration::from_secs(120))
-                .timeout_write(Duration::from_secs(10))
-                .build(),
+    for &n in &[3, 5, 10, 20] {
+        let (ok, err, size, elapsed) = test_batch(&agent, url, api_key, slot, n, true);
+        println!(
+            "  {n:4}x: {ok:3} ok, {err:3} err, {:>6} KB, {:.2}s",
+            size / 1024,
+            elapsed.as_secs_f64(),
         );
-        let ok = Arc::new(AtomicUsize::new(0));
-        let err = Arc::new(AtomicUsize::new(0));
-        let mut handles = Vec::with_capacity(n);
-
-        let start = Instant::now();
-        for _ in 0..n {
-            let agent = Arc::clone(&agent);
-            let ok = Arc::clone(&ok);
-            let err = Arc::clone(&err);
-            let url = url.to_string();
-            let api_key = api_key.clone();
-            handles.push(std::thread::spawn(move || {
-                let mut req = agent.post(&url).set("Content-Type", "application/json");
-                if let Some(k) = &api_key {
-                    req = req.set("x-api-key", k);
-                }
-                match req.send_bytes(body) {
-                    Ok(r) => {
-                        let text = r.into_string().unwrap_or_default();
-                        if text.contains("\"error\"") {
-                            err.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            ok.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                    Err(_) => {
-                        err.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            }));
-        }
-        for h in handles {
-            let _ = h.join();
-        }
-        let elapsed = start.elapsed();
-        let o = ok.load(Ordering::Relaxed);
-        let e = err.load(Ordering::Relaxed);
-        print!("  {n:5}x: {o:5} ok, {e:5} err ({:.2}s)", elapsed.as_secs_f64());
-        if n >= 1000 {
-            // also test getBlock for heavy payload
-            let block_body = br#"{"jsonrpc":"2.0","id":1,"method":"getBlock","params":[423400000,{"encoding":"json","transactionDetails":"full","maxSupportedTransactionVersion":0,"rewards":false}]}"#;
-            let agent2 = ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(10))
-                .timeout_read(Duration::from_secs(120))
-                .timeout_write(Duration::from_secs(10))
-                .build();
-            let start2 = Instant::now();
-            let mut req2 = agent2.post(url).set("Content-Type", "application/json");
-            if let Some(k) = &api_key {
-                req2 = req2.set("x-api-key", k);
-            }
-            match req2.send_bytes(block_body) {
-                Ok(r) => {
-                    let text = r.into_string().unwrap_or_default();
-                    let sz = text.len();
-                    let t = start2.elapsed();
-                    print!(" | getBlock: {sz} bytes in {:.2}s", t.as_secs_f64());
-                }
-                Err(e) => {
-                    print!(" | getBlock: {e}");
-                }
-            }
-        }
-        println!();
-        if o == 0 && n >= 100 {
-            println!("  ceiling found at {n}");
-            break;
-        }
     }
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!("usage: {} <url> [api_key]", args[0]);
+    if args.len() < 3 {
+        eprintln!("usage: {} batchtest <url> [api_key]", args[0]);
+
         std::process::exit(1);
     }
-    let url = &args[1];
-    let api_key = if args.len() > 2 {
-        Some(args[2].clone())
+    let mode = &args[1];
+    let url = &args[2];
+    let api_key = if args.len() > 3 {
+        Some(args[3].clone())
     } else {
         None
     };
-    println!("testing: {url}");
-    test_rate_limit(url, &api_key);
+
+    match mode.as_str() {
+        "batchtest" => {
+            println!("batch test: {url}");
+            run_batch_test(url, &api_key);
+        }
+        _ => {
+            eprintln!("unknown mode: {mode}");
+            std::process::exit(1);
+        }
+    }
 }
