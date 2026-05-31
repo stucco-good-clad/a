@@ -6,48 +6,10 @@ on:
   pull_request:
 
 jobs:
-  ubuntu:
+  build-and-run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: System specs
-        run: |
-          echo "=== OS ==="
-          lsb_release -d
-          echo
-          echo "=== CPU ==="
-          lscpu | grep 'Model name' | head -1 | sed 's/Model name:\s*//'
-          nproc
-          echo
-          echo "=== RAM ==="
-          free -h | awk '/^Mem:/ { print $2" total" }'
-          echo
-          echo "=== Disk ==="
-          df -h / | awk 'NR==2 { print $2" total, "$4" free" }'
-      - run: rustup update stable && rustup default stable
-      - run: cargo build --release
-      - run: cargo run --release
-        env:
-          key_1: ${{ secrets.KEY_1 }}
-
-  macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: System specs
-        run: |
-          echo "=== OS ==="
-          sw_vers
-          echo
-          echo "=== CPU ==="
-          sysctl -n machdep.cpu.brand_string
-          sysctl -n hw.ncpu
-          echo
-          echo "=== RAM ==="
-          sysctl -n hw.memsize | awk '{ printf "%.0f GB\n", $1 / 1073741824 }'
-          echo
-          echo "=== Disk ==="
-          df -h / | awk 'NR==2 { print $2" total, "$4" free" }'
       - run: rustup update stable && rustup default stable
       - run: cargo build --release
       - run: cargo run --release
