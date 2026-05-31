@@ -209,7 +209,7 @@ async fn test_batch(
             }
         }
         Err(e) => {
-            let kind = classify_parse_bytes_error(e);
+            let kind = classify_parse_bytes_error(&e);
             eprintln!("  batch request failed: {} [{}]", e, kind);
             BatchResult {
                 ok: 0,
