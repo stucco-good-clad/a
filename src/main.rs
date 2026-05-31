@@ -5,7 +5,7 @@ use std::thread;
 use ureq::Agent;
 
 const CHUNK: u64 = 500_000;
-const RANGE: u64 = 1_000_000;
+const RANGE: u64 = 2_000_000;
 
 const PREFIXES: &[&str] = &[
     "ams", "fra", "lon", "ny", "va", "slc", "la", "jp", "sg",
