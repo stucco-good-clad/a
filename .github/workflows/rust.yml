@@ -7,9 +7,23 @@ on:
 
 jobs:
   build-and-run:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
+      - name: System specs
+        run: |
+          echo "=== macOS ==="
+          sw_vers
+          echo
+          echo "=== CPU ==="
+          sysctl -n machdep.cpu.brand_string
+          sysctl -n hw.ncpu
+          echo
+          echo "=== RAM ==="
+          sysctl -n hw.memsize | awk '{ printf "%.0f GB\n", $1 / 1073741824 }'
+          echo
+          echo "=== Disk ==="
+          df -h / | awk 'NR==2 { print $2" total, "$4" free" }'
       - run: rustup update stable && rustup default stable
       - run: cargo build --release
       - run: cargo run --release
