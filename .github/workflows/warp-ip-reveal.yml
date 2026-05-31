@@ -1,0 +1,48 @@
+name: Cloudflare WARP IP Reveal
+
+on:
+  workflow_dispatch:
+
+jobs:
+  warp-reveal:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show IP before WARP
+        run: |
+          echo "=== IP BEFORE WARP ==="
+          curl -s https://ifconfig.me || true
+          echo ""
+          curl -s https://ipinfo.io/json || true
+
+      - name: Install Cloudflare WARP
+        run: |
+          curl -fsSL https://pkg.cloudflareclient.com/install.sh | sudo bash
+
+      - name: Register WARP
+        run: |
+          sudo warp-cli registration new
+
+      - name: Connect WARP (proxy mode)
+        run: |
+          sudo warp-cli set-mode proxy
+          sudo warp-cli connect
+          sleep 8
+
+      - name: Verify WARP status
+        run: |
+          sudo warp-cli status || true
+          sudo warp-cli get-accept-dns || true
+          sudo warp-cli mode || true
+
+      - name: Show IP after WARP
+        run: |
+          echo "=== IP AFTER WARP ==="
+          curl -s --proxy socks5://127.0.0.1:4000 https://ifconfig.me || true
+          echo ""
+          curl -s --proxy socks5://127.0.0.1:4000 https://ipinfo.io/json || true
