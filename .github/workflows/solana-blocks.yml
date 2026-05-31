@@ -13,15 +13,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
-      - name: Rate limit test - tatum.io
-        run: ./target/release/hello-world "https://solana-mainnet.gateway.tatum.io/"
-      - name: Rate limit test - leorpc.com
-        run: ./target/release/hello-world "https://solana.leorpc.com/?api_key=FREE"
-      - name: Rate limit test - aex402.com
-        run: ./target/release/hello-world "https://rpc.aex402.com"
-      - name: Rate limit test - publicnode.com
-        run: ./target/release/hello-world "https://solana.publicnode.com"
-      - name: Rate limit test - pocket.network
-        run: ./target/release/hello-world "https://solana.api.pocket.network/"
-      - name: Rate limit test - solanavibestation.com
-        run: ./target/release/hello-world "https://public.rpc.solanavibestation.com/"
+      - name: Rate limit test - mainnet-beta
+        run: ./target/release/hello-world "https://api.mainnet-beta.solana.com/"
+      - name: Rate limit test - mainnet
+        run: ./target/release/hello-world "https://api.mainnet.solana.com/"
