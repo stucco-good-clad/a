@@ -35,10 +35,9 @@ jobs:
         run: |
           sudo warp-cli --accept-tos registration new
 
-      - name: Connect WARP (proxy mode)
+      - name: Connect WARP
         run: |
-          sudo warp-cli set-mode proxy
-          sudo warp-cli connect
+          sudo warp-cli --accept-tos connect
           sleep 8
 
       - name: Verify WARP status
