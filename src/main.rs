@@ -1,13 +1,15 @@
+use simd_json::prelude::ValueAsContainer;
+use simd_json::prelude::ValueObjectAccess;
 use std::env;
 use std::fmt;
-use std::fs::File;
-use std::io::copy;
+use std::io::Read;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use rayon::iter::IntoParallelIterator;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use serde_json::json;
+use simd_json::OwnedValue;
 use ureq::{Agent, AgentBuilder};
 
 #[derive(Clone, Copy)]
@@ -110,13 +112,6 @@ fn get_slot(agent: &Agent, url: &str, api_key: &Option<String>) -> Option<u64> {
     }
 }
 
-fn write_response_to_file(r: ureq::Response, path: &str) -> std::io::Result<u64> {
-    let mut f = File::create(path)?;
-    let mut reader = r.into_reader();
-    let size = copy(&mut reader, &mut f)?;
-    Ok(size)
-}
-
 fn test_batch(
     agent: &Agent,
     url: &str,
@@ -143,42 +138,24 @@ fn test_batch(
     }
 
     let start = Instant::now();
-    let tmp_path = format!("/tmp/batch_{}_{}.json", slot, count);
-
     match req.send_bytes(body.as_bytes()) {
         Ok(r) => {
-            let write_size = match write_response_to_file(r, &tmp_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("  batch: file write error: {}", e);
-                    return BatchResult {
-                        ok: 0,
-                        err: count,
-                        bytes: 0,
-                        elapsed: start.elapsed(),
-                        error_kind: Some(BatchErrorKind::Io),
-                    };
-                }
-            };
+            let mut buf = Vec::new();
+            if let Err(e) = r.into_reader().read_to_end(&mut buf) {
+                eprintln!("  batch: read error: {}", e);
+                return BatchResult {
+                    ok: 0,
+                    err: count,
+                    bytes: 0,
+                    elapsed: start.elapsed(),
+                    error_kind: Some(BatchErrorKind::Io),
+                };
+            }
             let elapsed = start.elapsed();
+            let size = buf.len();
 
-            let text = match std::fs::read_to_string(&tmp_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("  batch: file read error: {}", e);
-                    return BatchResult {
-                        ok: 0,
-                        err: count,
-                        bytes: 0,
-                        elapsed,
-                        error_kind: Some(BatchErrorKind::Io),
-                    };
-                }
-            };
-
-            let size = text.len();
-            if text.is_empty() {
-                eprintln!("  batch: empty response from {} bytes", write_size);
+            if buf.is_empty() {
+                eprintln!("  batch: empty response");
                 return BatchResult {
                     ok: 0,
                     err: count,
@@ -187,61 +164,68 @@ fn test_batch(
                     error_kind: Some(BatchErrorKind::Empty),
                 };
             }
-            match serde_json::from_str::<serde_json::Value>(&text) {
+
+            // SIMD-accelerated JSON parse in memory
+            let (ok, err) = match simd_json::from_slice::<OwnedValue>(&mut buf) {
                 Ok(v) => {
                     if let Some(arr) = v.as_array() {
-                        let (ok, err) = arr.iter().fold((0, 0), |(o, e), item| {
+                        let (o, e) = arr.iter().fold((0, 0), |(o, e), item| {
                             if item.get("result").is_some() {
                                 (o + 1, e)
                             } else {
                                 (o, e + 1)
                             }
                         });
-                        if err > 0 {
-                            let first_err = arr
-                                .iter()
-                                .find(|item| item.get("result").is_none())
-                                .and_then(|item| item.get("error"))
-                                .and_then(|e| e.get("message"))
-                                .and_then(|m| m.as_str())
-                                .unwrap_or("unknown");
-                            eprintln!("  batch errors: {} (sample: {})", err, first_err);
-                        }
-                        return BatchResult {
-                            ok,
-                            err,
-                            bytes: size,
-                            elapsed,
-                            error_kind: if err > 0 {
-                                Some(classify_error("error in response"))
+                        (o, e)
+                    } else {
+                        (0, count)
+                    }
+                }
+                Err(_) => {
+                    // Fallback to serde
+                    match serde_json::from_slice::<serde_json::Value>(buf.clone().as_slice()) {
+                        Ok(v) => {
+                            if let Some(arr) = v.as_array() {
+                                let (o, e) = arr.iter().fold((0, 0), |(o, e), item| {
+                                    if item.get("result").is_some() {
+                                        (o + 1, e)
+                                    } else {
+                                        (o, e + 1)
+                                    }
+                                });
+                                (o, e)
                             } else {
-                                None
-                            },
-                        };
-                    }
-                    eprintln!("  batch: response not an array (wrote {} bytes)", size);
-                    BatchResult {
-                        ok: 0,
-                        err: count,
-                        bytes: size,
-                        elapsed,
-                        error_kind: Some(BatchErrorKind::JsonParse),
+                                (0, count)
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("  batch parse error: {}", e);
+                            (0, count)
+                        }
                     }
                 }
-                Err(e) => {
-                    eprintln!("  batch JSON parse error: {}", e);
-                    eprintln!(
-                        "  response head (first 500 chars):\n{}",
-                        &text[..text.len().min(500)]
-                    );
-                    BatchResult {
-                        ok: 0,
-                        err: count,
-                        bytes: size,
-                        elapsed,
-                        error_kind: Some(BatchErrorKind::JsonParse),
-                    }
-                }
+            };
+
+            if err > 0 {
+                let text = unsafe { std::str::from_utf8_unchecked(&buf) };
+                let sample = if text.len() > 500 {
+                    &text[..500]
+                } else {
+                    text
+                };
+                eprintln!("  batch errors: {} (body head: {})", err, sample);
+            }
+
+            BatchResult {
+                ok,
+                err,
+                bytes: size,
+                elapsed,
+                error_kind: if err > 0 {
+                    Some(BatchErrorKind::JsonParse)
+                } else {
+                    None
+                },
             }
         }
         Err(e) => {
@@ -280,8 +264,33 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
     let slot = get_slot(&agent, url, api_key).unwrap_or(0);
     println!("{slot}\n");
 
-    println!("=== 50x batch concurrency sweep ===");
-    let concurrency_levels = [1, 2, 5, 10, 20];
+    // Detect batch size from CLI arg: batchtest <url> [api_key] [batch_size]
+    let args: Vec<String> = env::args().collect();
+    let batch_size = if args.len() > 3 {
+        args[3].parse().unwrap_or(100)
+    } else {
+        100
+    };
+    // Detect concurrency max from CLI arg: batchtest <url> [api_key] [batch_size] [max_conc]
+    let max_conc = if args.len() > 4 {
+        args[4].parse().unwrap_or(20)
+    } else {
+        20
+    };
+
+    println!(
+        "=== {}x batch concurrency sweep up to {} === ",
+        batch_size, max_conc
+    );
+    let mut concurrency_levels = Vec::new();
+    let mut c = 1;
+    while c <= max_conc {
+        concurrency_levels.push(c);
+        c *= 2;
+    }
+    if !concurrency_levels.contains(&max_conc) {
+        concurrency_levels.push(max_conc);
+    }
 
     for &conc in &concurrency_levels {
         let start = Instant::now();
@@ -293,7 +302,7 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
                     let agent = agent.clone();
                     let url = url.to_string();
                     let api_key = api_key.clone();
-                    test_batch(&agent, &url, &api_key, slot - c as u64, 50, true)
+                    test_batch(&agent, &url, &api_key, slot - c as u64, batch_size, true)
                 })
                 .collect()
         });
@@ -366,7 +375,7 @@ fn run_batch_test(url: &str, api_key: &Option<String>) {
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: {} batchtest <url> [api_key]", args[0]);
+        eprintln!("usage: {} batchtest <url> [api_key] [batch_size=100] [max_concurrency=20]", args[0]);
         std::process::exit(1);
     }
     let mode = &args[1];
