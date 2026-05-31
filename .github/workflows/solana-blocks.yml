@@ -13,21 +13,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
-      - name: Batch test - ams (full tx)
-        run: ./target/release/hello-world batchtest "http://ams.rpc.orbitflare.com" "${{ secrets.KEY_1 }}"
-      - name: Batch test - fra (full tx)
-        run: ./target/release/hello-world batchtest "http://fra.rpc.orbitflare.com" "${{ secrets.KEY_1 }}"
-      - name: Batch test - lon (full tx)
-        run: ./target/release/hello-world batchtest "http://lon.rpc.orbitflare.com" "${{ secrets.KEY_1 }}"
-      - name: Batch test - ny (full tx)
+      - name: Batch test - ny
         run: ./target/release/hello-world batchtest "http://ny.rpc.orbitflare.com" "${{ secrets.KEY_1 }}"
-      - name: Batch test - va (full tx)
+      - name: Batch test - va
         run: ./target/release/hello-world batchtest "http://va.rpc.orbitflare.com" "${{ secrets.KEY_1 }}"
-      - name: Batch test - slc (full tx)
+      - name: Batch test - slc
         run: ./target/release/hello-world batchtest "http://slc.rpc.orbitflare.com" "${{ secrets.KEY_1 }}"
-      - name: Batch test - la (full tx)
+      - name: Batch test - la
         run: ./target/release/hello-world batchtest "http://la.rpc.orbitflare.com" "${{ secrets.KEY_1 }}"
-      - name: Batch test - jp (full tx)
-        run: ./target/release/hello-world batchtest "http://jp.rpc.orbitflare.com" "${{ secrets.KEY_1 }}"
-      - name: Batch test - sg (full tx)
-        run: ./target/release/hello-world batchtest "http://sg.rpc.orbitflare.com" "${{ secrets.KEY_1 }}"
