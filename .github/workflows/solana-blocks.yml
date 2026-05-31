@@ -19,15 +19,28 @@ jobs:
         env:
           key_1: ${{ secrets.KEY_1 }}
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: blocks
-          path: blocks.txt
-
-      - uses: softprops/action-gh-release@v2
+      - name: Upload blocks to per-worker releases
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        with:
-          tag_name: blocks-${{ github.run_number }}
-          name: Blocks ${{ github.run_number }}
-          body: "${{ github.run_number }} block dump from commit ${{ github.sha }}"
-          files: blocks.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          for dir in blocks_output/worker_*/; do
+            [ -d "$dir" ] || continue
+            worker=$(basename "$dir")
+
+            files=("$dir"*.json)
+            count=${#files[@]}
+            [ "$count" -eq 0 ] && continue
+
+            tag="${worker}-run-${{ github.run_id }}"
+            echo "::group::Creating release $tag ($count files from $worker)"
+            gh release create "$tag" \
+              "$dir"*.json \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Blocks $worker (run ${{ github.run_id }})" \
+              --notes "$count raw block files from worker $worker"
+            echo "::endgroup::"
+          done
