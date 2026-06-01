@@ -27,9 +27,9 @@ for bs in $BATCH_SIZES; do
       continue
     fi
     ok=$(echo "$output" | grep -oP 'Done: \K[0-9]+' | head -1 || echo 0)
-    err=$(echo "$output" | grep -oP 'Done: .*? \K[0-9]+' | head -1 || echo 0)
-    mbs=$(echo "$output" | grep -oP '\d+\.\d+ MB/s' | grep -oP '[\d.]+' | head -1 || echo 0)
-    elapsed=$(echo "$output" | grep -oP '\d+ seconds' | grep -oP '[\d]+' | head -1 || echo 1)
+    err=$(echo "$output" | grep -oP 'ok, \K[0-9]+' | head -1 || echo 0)
+    mbs=$(echo "$output" | grep -oP '([\d.]+) MB/s' | grep -oP '[\d.]+' | head -1 || echo 0)
+    elapsed=$(echo "$output" | grep -oP 'in \K([\d.]+)s' | head -1 || echo 1)
 
     if [[ "$elapsed" == "0" || -z "$elapsed" ]]; then elapsed=1; fi
     bps=$(awk "BEGIN {printf \"%.1f\", $BLOCKS/$elapsed}")
