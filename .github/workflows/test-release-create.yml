@@ -11,11 +11,16 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Creating single test release..."
-      - env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download release.zip from devakapatel/files
         run: |
-          gh release create "test-single-release-$(date +%s)" \
-            --repo "${{ github.repository }}" \
-            --title "Test Single Release" \
-            --notes "Testing if a single gh release create works"
+          echo "Fetching release.zip..."
+          curl -sL -o release.zip \
+            "https://github.com/devakapatel/files/releases/download/1/release.zip"
+          ls -lh release.zip
+
+      - name: Store in Actions artifact storage
+        uses: actions/upload-artifact@v4
+        with:
+          name: fetched-release
+          path: release.zip
+          retention-days: 90
