@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
+      options: --user=1000:1000
 
     steps:
       - name: Update system
