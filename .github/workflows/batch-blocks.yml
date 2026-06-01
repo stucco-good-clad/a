@@ -1,0 +1,49 @@
+name: batch-blocks
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  RPC_URL: http://slc.rpc.orbitflare.com
+
+permissions:
+  contents: write
+
+jobs:
+  batch-blocks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: batch-blocks
+
+      - name: Fetch 1000 blocks in batches
+        working-directory: batch-blocks
+        run: cargo run --release
+        env:
+          KEY_1: ${{ secrets.KEY_1 }}
+          KEY_2: ${{ secrets.KEY_2 }}
+          KEY_3: ${{ secrets.KEY_3 }}
+          KEY_4: ${{ secrets.KEY_4 }}
+          KEY_5: ${{ secrets.KEY_5 }}
+          KEY_6: ${{ secrets.KEY_6 }}
+          KEY_7: ${{ secrets.KEY_7 }}
+          KEY_8: ${{ secrets.KEY_8 }}
+          KEY_9: ${{ secrets.KEY_9 }}
+          KEY_10: ${{ secrets.KEY_10 }}
+
+      - name: Create release with blocks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RANGE=$(cat batch-blocks/range.txt)
+          echo "Release range: ${RANGE}"
+          gh release create "blocks-${RANGE}" \
+            --title "Blocks ${RANGE}" \
+            --notes "Full block data for slots ${RANGE}" \
+            batch-blocks/[0-9]*.txt
