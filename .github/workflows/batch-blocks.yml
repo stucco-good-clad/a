@@ -50,9 +50,13 @@ jobs:
             --title "Blocks ${START}-${END}" \
             --notes ""
 
+      - name: Build optimized binary
+        working-directory: batch-blocks
+        run: cargo build --release
+
       - name: Fetch 1000 blocks with batching 10x10 across 10 keys
         working-directory: batch-blocks
-        run: cargo run --release
+        run: ./target/release/batch-blocks
         env:
           RANGE_START: ${{ steps.range.outputs.start }}
           RANGE_END: ${{ steps.range.outputs.end }}
