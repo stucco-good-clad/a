@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Solana RPC endpoint URL
@@ -27,7 +27,7 @@ struct Args {
     end_slot: Option<u64>,
 
     /// Number of blocks per batch
-    #[arg(short, long, default_value = "50")]
+    #[arg(short, long, default_value = "10")]
     batch_size: usize,
 
     /// Maximum concurrent batch requests
@@ -45,19 +45,36 @@ struct Args {
     /// Backfill N blocks ending at current slot (overrides --start-slot/--end-slot)
     #[arg(long)]
     from_latest: Option<usize>,
+
+    /// Run the same config N times and print a comparison summary
+    #[arg(long)]
+    runs: Option<usize>,
 }
 
 #[derive(Debug)]
-struct RunResult {
+struct RunSummary {
+    batch: usize,
+    concurrency: usize,
     ok: usize,
     err: usize,
     mb_per_sec: f64,
     elapsed: f64,
+    blocks_per_sec: f64,
 }
 
-impl RunResult {
-    fn new(ok: usize, err: usize, mb_per_sec: f64, elapsed: f64) -> Self {
-        Self { ok, err, mb_per_sec, elapsed }
+impl RunSummary {
+    fn new(batch: usize, concurrency: usize, ok: usize, err: usize, bytes: u64, elapsed: f64, total: usize) -> Self {
+        let mb_per_sec = if elapsed > 0.0 {
+            (bytes as f64 / 1024.0 / 1024.0) / elapsed
+        } else {
+            0.0
+        };
+        let blocks_per_sec = if elapsed > 0.0 {
+            total as f64 / elapsed
+        } else {
+            0.0
+        };
+        Self { batch, concurrency, ok, err, mb_per_sec, elapsed, blocks_per_sec }
     }
 }
 
@@ -150,7 +167,7 @@ async fn send_batch(
     Ok((ok, err, batch_bytes))
 }
 
-async fn download_blocks(args: Args) -> Result<RunResult> {
+async fn download(args: Args, run_index: usize) -> Result<RunSummary> {
     let client = Client::builder()
         .user_agent("solana-backfill/0.1")
         .timeout(Duration::from_secs(args.timeout))
@@ -179,10 +196,7 @@ async fn download_blocks(args: Args) -> Result<RunResult> {
     let output_dir = PathBuf::from(args.output);
     fs::create_dir_all(&output_dir)?;
 
-    println!(
-        "Slots {} -> {} ({} blocks) [{}/{}]",
-        start_slot, end_slot, total, batch_size, args.max_concurrent
-    );
+    println!("[run {}] Slots {} -> {} ({} blocks) [{}/{}]", run_index + 1, start_slot, end_slot, total, batch_size, args.max_concurrent);
 
     let semaphore = std::sync::Arc::new(Semaphore::new(args.max_concurrent));
     let mut handles = Vec::new();
@@ -200,7 +214,10 @@ async fn download_blocks(args: Args) -> Result<RunResult> {
             let _p = permit;
             let count = end_idx - start_idx;
             match send_batch(&client, &url, &api_key, &slots, count, start_idx).await {
-                Ok((ok, err, bytes)) => (ok, err, bytes),
+                Ok((ok, err, bytes)) => {
+                    println!("[{}] {}->{} ok={} err={} bytes={}", run_index + 1, start_idx, end_idx - 1, ok, err, bytes);
+                    (ok, err, bytes)
+                }
                 Err(_) => (0, count, 0),
             }
         }));
@@ -219,25 +236,33 @@ async fn download_blocks(args: Args) -> Result<RunResult> {
     }
 
     let elapsed = start.elapsed().as_secs_f64();
-    let mb_per_sec = if elapsed > 0.0 {
-        (total_bytes as f64 / 1024.0 / 1024.0) / elapsed
-    } else {
-        0.0
-    };
-
-    Ok(RunResult::new(total_ok, total_err, mb_per_sec, elapsed))
+    Ok(RunSummary::new(batch_size, args.max_concurrent, total_ok, total_err, total_bytes, elapsed, total))
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let result = download_blocks(args).await?;
+    if let Some(runs) = args.runs {
+        let mut summaries = Vec::new();
+        for i in 0..runs {
+            let run_dir = format!("{}/run_{}", args.output, i + 1);
+            let mut run_args = args.clone();
+            run_args.output = run_dir.clone();
+            let summary = download(run_args, i).await?;
+            println!("[run {}] Done: {} ok, {} err, {:.2} MB/s, {:.2} blocks/s in {:.2}s", i + 1, summary.ok, summary.err, summary.mb_per_sec, summary.blocks_per_sec, summary.elapsed);
+            summaries.push(summary);
+        }
 
-    println!(
-        "Done: {} ok, {} err, {:.2} MB/s in {:.2}s",
-        result.ok, result.err, result.mb_per_sec, result.elapsed
-    );
-
-    Ok(())
+        println!("\n=== competition ({}) ===", runs);
+        println!("{:<6} {:<12} {:<8} {:<8} {:<12} {:<14} {:<12}", "batch", "concurr", "ok", "err", "MB/s", "blocks/s", "elapsed(s)");
+        for s in &summaries {
+            println!("{:<6} {:<12} {:<8} {:<8} {:<12.2} {:<14.2} {:<12.2}", s.batch, s.concurrency, s.ok, s.err, s.mb_per_sec, s.blocks_per_sec, s.elapsed);
+        }
+        Ok(())
+    } else {
+        let summary = download(args.clone(), 0).await?;
+        println!("Done: {} ok, {} err, {:.2} MB/s, {:.2} blocks/s in {:.2}s", summary.ok, summary.err, summary.mb_per_sec, summary.blocks_per_sec, summary.elapsed);
+        Ok(())
+    }
 }
