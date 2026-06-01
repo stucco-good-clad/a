@@ -24,7 +24,7 @@ jobs:
         with:
           workspaces: batch-blocks
 
-      - name: Get current slot and compute range
+      - name: Get current slot for release name
         id: range
         env:
           KEY_1: ${{ secrets.KEY_1 }}
@@ -54,7 +54,7 @@ jobs:
         working-directory: batch-blocks
         run: cargo build --release
 
-      - name: Fetch 1000 blocks with batching 10x10 across 10 keys
+      - name: Fetch 1000 valid blocks using getBlocks
         working-directory: batch-blocks
         run: ./target/release/batch-blocks
         env:
@@ -71,16 +71,14 @@ jobs:
           KEY_9: ${{ secrets.KEY_9 }}
           KEY_10: ${{ secrets.KEY_10 }}
 
-      - name: Create block archive and upload to release
+      - name: Upload block files to release (batches of 100)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           START="${{ steps.range.outputs.start }}"
           END="${{ steps.range.outputs.end }}"
           TAG="blocks-${START}-${END}"
-          ARCHIVE="blocks-${START}-${END}.tar.gz"
-          echo "Creating archive: ${ARCHIVE} (max compression)"
-          tar -cf - batch-blocks/[0-9]*.txt | gzip -9 > "${ARCHIVE}"
-          echo "Archive size: $(du -h "${ARCHIVE}" | cut -f1)"
-          echo "Uploading archive to release: ${TAG}"
-          gh release upload "${TAG}" "${ARCHIVE}" --clobber
+          COUNT=$(find batch-blocks -maxdepth 1 -name '[0-9]*.txt' | wc -l)
+          echo "Uploading ${COUNT} block files to release: ${TAG}"
+          find batch-blocks -maxdepth 1 -name '[0-9]*.txt' -print0 \
+            | xargs -0 -n 100 sh -c 'tag="$1"; shift; gh release upload "$tag" "$@" --clobber' "_" "${TAG}"

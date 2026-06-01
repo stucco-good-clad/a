@@ -31,16 +31,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(10);
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(120))
         .build()?;
 
-    // Use explicit range if provided (by workflow), otherwise compute from current slot
-    let (start, end) = if let (Ok(s), Ok(e)) =
+    // Determine the base slot range (end is finalized, start is a wide search window)
+    let search_end = if let (Ok(_s), Ok(e)) =
         (env::var("RANGE_START"), env::var("RANGE_END"))
     {
-        (s.parse::<u64>()?, e.parse::<u64>()?)
+        e.parse::<u64>()?
     } else {
-        // Get current slot
         println!("Getting current slot...");
         let body = json!({
             "jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []
@@ -55,18 +54,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let current = resp["result"].as_u64().expect("failed to parse slot");
         println!("Current slot: {}", current);
         let end = current.saturating_sub(2);
-        let start = end.saturating_sub(num_blocks as u64 - 1);
-        (start, end)
+        end
     };
-    let slots: Vec<u64> = (start..=end).collect();
-    let actual = slots.len();
 
-    // Output the range so the workflow can create the release
-    fs::write("range.txt", format!("{}-{}", start, end))?;
+    let max_search = 500_000u64;
+    let mut search_range = (num_blocks as u64 * 3).max(1000);
+    let mut all_blocks: Vec<u64> = Vec::new();
+
+    while all_blocks.len() < num_blocks && search_range <= max_search {
+        let range_start = search_end.saturating_sub(search_range - 1);
+        println!(
+            "Querying getBlocks({}, {}) ...",
+            range_start, search_end
+        );
+        let body = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "getBlocks",
+            "params": [range_start, search_end]
+        });
+        let resp: Value = client
+            .post(format!("{}?api_key={}", &rpc_url, keys[0]))
+            .json(&body)
+            .send()
+            .await?
+            .json()
+            .await?;
+        all_blocks = resp["result"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+            .unwrap_or_default();
+        println!("  Found {} valid blocks", all_blocks.len());
+        if all_blocks.len() < num_blocks {
+            let next = (search_range * 2).min(max_search);
+            println!("  Need {}, expanding search window to {}", num_blocks, next);
+            search_range = next;
+        }
+    }
+
+    if all_blocks.len() < num_blocks {
+        eprintln!(
+            "WARNING: only {} valid blocks in 500K range, taking all of them",
+            all_blocks.len()
+        );
+    }
+
+    // Take the most recent num_blocks
+    let slots: Vec<u64> = all_blocks
+        .into_iter()
+        .rev()
+        .take(num_blocks)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    let actual = slots.len();
+    let first_slot = slots.first().copied().unwrap_or(0);
+    let last_slot = slots.last().copied().unwrap_or(0);
+
+    // Output the actual range
+    fs::write("range.txt", format!("{}-{}", first_slot, last_slot))?;
 
     println!(
         "Fetching {} blocks (slots {}-{}), {} per batch, {} keys",
-        actual, start, end, batch_size, n_keys
+        actual, first_slot, last_slot, batch_size, n_keys
     );
 
     let batches: Vec<Vec<u64>> = slots.chunks(batch_size).map(|c| c.to_vec()).collect();
@@ -157,8 +207,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     per_key_err[key_idx].fetch_add(1, Ordering::Relaxed);
                 }
             }
-
-            // No explicit return needed - tokio::spawn accepts ()
         });
         handles.push(handle);
     }
