@@ -1,0 +1,43 @@
+name: CounterB
+on:
+  workflow_run:
+    workflows: ["CounterA"]
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  increment:
+    runs-on: ubuntu-latest
+    outputs:
+      count: ${{ steps.counter.outputs.count }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ github.token }}
+
+      - name: Read and increment counter
+        id: counter
+        run: |
+          COUNTER=$(cat counter.txt)
+          COUNTER=$((COUNTER + 1))
+          echo "$COUNTER" > counter.txt
+          echo "count=$COUNTER" >> "$GITHUB_OUTPUT"
+          echo "Counter is now: $COUNTER"
+
+      - name: Commit counter
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+          git add counter.txt
+          git commit -m "B: increment counter to ${{ steps.counter.outputs.count }}"
+          git push
+
+      - name: Trigger workflow A
+        uses: peter-evans/workflow-dispatch@v2
+        with:
+          workflow: workflow-a.yml
+          token: ${{ github.token }}
