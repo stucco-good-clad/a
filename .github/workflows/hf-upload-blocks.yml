@@ -20,39 +20,30 @@ jobs:
             "https://github.com/devakapatel/files/releases/download/1/blocks.txt"
           ls -lh blocks.txt
 
-      - name: Install huggingface_hub
-        run: pip install huggingface_hub -q
+      - name: Install hf-mount (NFS backend)
+        run: |
+          curl -sL "https://github.com/huggingface/hf-mount/releases/latest/download/hf-mount-nfs-x86_64-linux" \
+            -o hf-mount
+          chmod +x hf-mount
+          sudo mv hf-mount /usr/local/bin/
 
-      - name: Ensure HF dataset repo exists
+      - name: Mount HF bucket
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python -c '
-          import os
-          from huggingface_hub import HfApi
-          api = HfApi(token=os.environ["HF_TOKEN"])
-          api.create_repo(
-            repo_id="ammamma/gh-storage",
-            repo_type="dataset",
-            exist_ok=True,
-            private=False,
-          )
-          print("Repo ready: ammamma/gh-storage")
-          '
+          hf-mount start --hf-token "$HF_TOKEN" bucket ammamma/gh-storage /tmp/bucket
+          for i in $(seq 1 30); do
+            if [ -d /tmp/bucket ]; then
+              echo "Mounted /tmp/bucket"
+              break
+            fi
+            sleep 1
+          done
 
-      - name: Upload blocks.txt to HF dataset
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      - name: Upload via mount
         run: |
-          python -c '
-          import os
-          from huggingface_hub import HfApi
-          api = HfApi(token=os.environ["HF_TOKEN"])
-          api.upload_file(
-            path_or_fileobj="blocks.txt",
-            path_in_repo="blocks.txt",
-            repo_id="ammamma/gh-storage",
-            repo_type="dataset",
-          )
-          print("Uploaded blocks.txt to ammamma/gh-storage")
-          '
+          cp blocks.txt /tmp/bucket/blocks.txt
+          ls -lh /tmp/bucket/blocks.txt
+
+      - name: Unmount
+        run: hf-mount stop /tmp/bucket || true
