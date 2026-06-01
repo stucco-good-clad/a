@@ -27,3 +27,44 @@ jobs:
             const json = await res.json();
             console.log('Latest slot:', json.result);
           "
+
+      - name: Get previous 10K valid blocks
+        run: |
+          bun -e "
+            const rpc = 'http://sg.rpc.orbitflare.com';
+            const key = process.env.KEY_1;
+
+            async function call(method, params) {
+              const res = await fetch(rpc, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-api-key': key },
+                body: JSON.stringify({ jsonrpc:'2.0', id:1, method, params }),
+              });
+              const json = await res.json();
+              if (json.error) throw new Error(json.error.message);
+              return json.result;
+            }
+
+            const tip = await call('getSlot', []);
+            console.log('Current slot:', tip);
+
+            let end = tip - 1;
+            let allBlocks = [];
+            const window = 50000;
+
+            while (allBlocks.length < 10000 && end > 0) {
+              const start = Math.max(0, end - window);
+              console.log('Scanning', start, 'to', end);
+              const blocks = await call('getBlocks', [start, end]);
+              allBlocks = blocks.concat(allBlocks);
+              end = start - 1;
+              if (end <= 0) break;
+            }
+
+            const count = Math.min(10000, allBlocks.length);
+            const last10k = allBlocks.slice(-count);
+
+            console.log('Found', allBlocks.length, 'blocks total');
+            console.log('Oldest:', last10k[0], 'Newest:', last10k[last10k.length-1]);
+            console.log('10K block slots:', last10k.join(','));
+          "
