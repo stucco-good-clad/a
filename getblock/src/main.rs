@@ -1,4 +1,6 @@
 use std::env;
+use std::fs;
+use std::path::Path;
 
 use serde_json::{json, Value};
 
@@ -12,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = reqwest::Client::new();
 
-    // Step 1: get the latest slot so we can query a recent finalized block
+    // Step 1: get the latest slot
     let body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -28,12 +30,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .json()
         .await?;
 
-    let latest_slot = resp["result"]
+    let slot = resp["result"]
         .as_u64()
         .expect("failed to parse getSlot result");
 
+    // Write the slot number so the workflow can read it
+    fs::write("slot.txt", slot.to_string())?;
+
+    let block_file = format!("{}.txt", slot);
+
+    // Check if we already have this block cached
+    if Path::new(&block_file).exists() {
+        return Ok(());
+    }
+
     // Query a finalized block (2 slots behind latest)
-    let target_slot = latest_slot.saturating_sub(2);
+    let target_slot = slot.saturating_sub(2);
 
     let body = json!({
         "jsonrpc": "2.0",
@@ -58,8 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .json()
         .await?;
 
-    println!("Slot: {}", target_slot);
-    println!("Response: {}", serde_json::to_string_pretty(&resp)?);
+    let text = serde_json::to_string_pretty(&resp)?;
+    fs::write(&block_file, &text)?;
 
     Ok(())
 }
