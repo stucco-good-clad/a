@@ -3,43 +3,42 @@ name: test-release-create
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   actions: write
-  contents: read
+  contents: write
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v6
+
       - name: Download release.zip
         run: |
           curl -L -o release.zip \
             "https://github.com/devakapatel/files/releases/download/1/release.zip"
-          ls -lh release.zip
+          ORIG=$(stat -c%s release.zip)
+          echo "Original: $((ORIG / 1048576)) MB ($ORIG bytes)"
 
-      - name: Probe artifact size limit (double copies, 0-compression zip)
+      - name: Probe size limit (create + delete releases)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-
           REPO="${{ github.repository }}"
-          RUN_ID="${{ github.run_id }}"
           ORIG_SIZE=$(stat -c%s release.zip)
-          BASE_MB=$(( ORIG_SIZE / 1048576 ))
-          echo "Original: ${BASE_MB} MB"
+          MB=$((ORIG_SIZE / 1048576))
+          echo "Original: ${MB} MB"
 
-          mkdir -p probe_work
-
-          for i in $(seq 0 10); do
+          for i in $(seq 0 15); do
             NUM_COPIES=$((2 ** i))
             echo ""
             echo "=== Iteration $i: ${NUM_COPIES} copies ==="
 
-            dir="probe_work/$i"
+            dir="work/$i"
             mkdir -p "$dir"
-
             for c in $(seq 0 $((NUM_COPIES - 1))); do
               cp release.zip "$dir/copy_${c}"
             done
@@ -47,44 +46,37 @@ jobs:
             zip_name="probe_${i}.zip"
             zip -0 -q -r "$zip_name" "$dir/"
             ZIP_SIZE=$(stat -c%s "$zip_name")
-            ZIP_MB=$(( ZIP_SIZE / 1048576 ))
+            ZIP_MB=$((ZIP_SIZE / 1048576))
             echo "  → ${ZIP_MB} MB"
 
-            # Upload via actions/upload-artifact internal API
-            # Step 1: Create artifact resource
-            CREATE_RESP=$(gh api --method POST \
-              -H "Accept: application/vnd.github+json" \
-              "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
-              -f "name=probe-${i}-${NUM_COPIES}x" \
-              -f "archive_format=zip" 2>&1) || {
-              echo "  ✗ CREATE FAILED at ${ZIP_MB} MB"
-              echo "  Error: $CREATE_RESP"
-              echo ""
-              echo "========== LIMIT FOUND =========="
-              echo "Last successful: iteration $((i-1)) ($(( ZIP_MB / 2 )) MB)"
-              echo "Failed at: ${ZIP_MB} MB (${NUM_COPIES} copies)"
-              rm -rf probe_work "$zip_name" release.zip
-              exit 0
-            }
-
-            ARTIFACT_ID=$(echo "$CREATE_RESP" | jq -r '.id')
-            UPLOAD_URL=$(echo "$CREATE_RESP" | jq -r '.upload_url // empty')
-
-            if [ -n "$UPLOAD_URL" ] && [ "$UPLOAD_URL" != "null" ]; then
-              # Step 2: Upload zip to the signed URL
-              curl -s -X PUT \
-                -H "Content-Type: application/zip" \
-                -H "Authorization: Bearer ${{ github.token }}" \
-                --data-binary @"$zip_name" \
-                "$UPLOAD_URL" > /dev/null 2>&1
+            if [ "$ZIP_MB" -ge 51200 ]; then
+              echo "  Skipping (>= 51 GB)"
+              break
             fi
 
-            echo "  ✓ Uploaded (artifact id: $ARTIFACT_ID, ${ZIP_MB} MB)"
+            echo "  Attempting upload..."
+            if gh release create "probe-${ZIP_MB}MB-${NUM_COPIES}x" \
+              --repo "$REPO" \
+               --title "Probe ${ZIP_MB} MB (${NUM_COPIES} copies)" \
+              --notes "Size limit probe" \
+              "$zip_name"; then
+              echo "  ✓ Uploaded (${ZIP_MB} MB)"
+              gh release delete "probe-${ZIP_MB}MB-${NUM_COPIES}x" \
+                --repo "$REPO" --yes || true
+              echo "  Deleted after upload"
+            else
+              echo "  ✗ Upload FAILED at ${ZIP_MB} MB"
+              echo ""
+              echo "========== LIMIT FOUND =========="
+              echo "Last successful: iteration $((i-1)) ($((ZIP_MB / 2)) MB)"
+              echo "Failed at: ${ZIP_MB} MB (${NUM_COPIES} copies)"
+              rm -rf work "$zip_name" release.zip
+              exit 0
+            fi
 
-            # Clean up for next iteration
             rm -rf "$dir" "$zip_name"
           done
 
           echo ""
           echo "========== All sizes succeeded up to ${ZIP_MB} MB =========="
-          rm -rf probe_work release.zip
+          rm -rf work release.zip
