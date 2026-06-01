@@ -90,7 +90,7 @@ async fn send_batch(
     slots: &[u64],
     batch_size: usize,
     offset: usize,
-) -> Result<(usize, usize), anyhow::Error> {
+) -> Result<(usize, usize, u64), anyhow::Error> {
     let mut batch = Vec::with_capacity(batch_size.min(slots.len().saturating_sub(offset)));
     let len = batch_size.min(slots.len().saturating_sub(offset));
     for i in 0..len {
@@ -120,20 +120,21 @@ async fn send_batch(
     }
     let resp = req.body(body).send().await?;
     let status = resp.status();
-    let bytes = resp.bytes().await?;
-    let buf = bytes.to_vec();
+    let resp_bytes = resp.bytes().await?;
+    let buf = resp_bytes.to_vec();
+    let batch_bytes = buf.len() as u64;
 
     if !status.is_success() {
-        return Ok((0, len));
+        return Ok((0, len, batch_bytes));
     }
 
     let v: Value = match serde_json::from_slice(&buf) {
         Ok(v) => v,
-        Err(_) => return Ok((0, len)),
+        Err(_) => return Ok((0, len, batch_bytes)),
     };
     let arr = match v.as_array() {
         Some(a) => a,
-        None => return Ok((0, len)),
+        None => return Ok((0, len, batch_bytes)),
     };
 
     let mut ok = 0usize;
@@ -145,7 +146,7 @@ async fn send_batch(
             err += 1;
         }
     }
-    Ok((ok, err))
+    Ok((ok, err, batch_bytes))
 }
 
 async fn download_blocks(args: Args) -> Result<RunResult> {
@@ -195,7 +196,7 @@ async fn download_blocks(args: Args) -> Result<RunResult> {
             let _p = permit;
             let count = end_idx - start_idx;
             match send_batch(&client, &url, &api_key, &slots, count, start_idx).await {
-                Ok((ok, err)) => (ok, err, ok as u64),
+                Ok((ok, err, bytes)) => (ok, err, bytes),
                 Err(_) => (0, count, 0),
             }
         }));
@@ -203,19 +204,19 @@ async fn download_blocks(args: Args) -> Result<RunResult> {
 
     let mut total_ok = 0usize;
     let mut total_err = 0usize;
-    let mut total_blocks_written = 0u64;
+    let mut total_bytes = 0u64;
 
     for h in handles {
-        if let Ok((ok, err, written)) = h.await {
+        if let Ok((ok, err, bytes)) = h.await {
             total_ok += ok;
             total_err += err;
-            total_blocks_written += written;
+            total_bytes += bytes;
         }
     }
 
     let elapsed = start.elapsed();
     let mb_per_sec = if elapsed.as_secs_f64() > 0.0 {
-        ((total_blocks_written * 1024) as f64 / 1024.0 / 1024.0) / elapsed.as_secs_f64()
+        (total_bytes as f64 / 1024.0 / 1024.0) / elapsed.as_secs_f64()
     } else {
         0.0
     };
@@ -225,8 +226,6 @@ async fn download_blocks(args: Args) -> Result<RunResult> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
     let args = Args::parse();
 
     let result = download_blocks(args).await?;
