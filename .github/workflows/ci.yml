@@ -4,29 +4,16 @@ on:
   push:
 
 jobs:
-  hello:
+  bench:
     runs-on: ubuntu-latest
     env:
-      KEY_1: ${{ secrets.KEY_1 }}
+      HELIUS_KEY: ${{ secrets.HELIUS_KEY }}
 
     steps:
       - uses: actions/checkout@v6
 
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
+      - name: Build
+        run: cargo build --release
 
-      - name: Get latest slot
-        run: |
-          bun -e "
-            const res = await fetch('http://sg.rpc.orbitflare.com', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json', 'x-api-key': process.env.KEY_1 },
-              body: JSON.stringify({ jsonrpc:'2.0', id:1, method:'getSlot', params:[] }),
-            });
-            const json = await res.json();
-            console.log('Latest slot:', json.result);
-          "
-
-      - name: Fetch 5K full blocks
-        run: bun run .github/scripts/fetch-blocks.js
+      - name: Benchmark batch sizes x concurrencies
+        run: cargo run --release
