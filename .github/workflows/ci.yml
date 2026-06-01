@@ -28,11 +28,14 @@ jobs:
             console.log('Latest slot:', json.result);
           "
 
-      - name: Get previous 10K valid blocks
+      - name: Get 5K full blocks with batching+concurrency
         run: |
           bun -e "
             const rpc = 'http://sg.rpc.orbitflare.com';
             const key = process.env.KEY_1;
+            const TARGET = 5000;
+            const BATCH_SIZE = 10;
+            const CONCURRENCY = 20;
 
             async function call(method, params) {
               const res = await fetch(rpc, {
@@ -45,14 +48,15 @@ jobs:
               return json.result;
             }
 
+            // 1. Get tip
             const tip = await call('getSlot', []);
             console.log('Current slot:', tip);
 
+            // 2. Scan backward for 5K block slots
             let end = tip - 1;
             let allBlocks = [];
             const window = 50000;
-
-            while (allBlocks.length < 10000 && end > 0) {
+            while (allBlocks.length < TARGET && end > 0) {
               const start = Math.max(0, end - window);
               console.log('Scanning', start, 'to', end);
               const blocks = await call('getBlocks', [start, end]);
@@ -61,10 +65,63 @@ jobs:
               if (end <= 0) break;
             }
 
-            const count = Math.min(10000, allBlocks.length);
-            const last10k = allBlocks.slice(-count);
+            const count = Math.min(TARGET, allBlocks.length);
+            const slots = allBlocks.slice(-count);
+            console.log('Found', slots.length, 'block slots');
+            console.log('Oldest:', slots[0], 'Newest:', slots[slots.length-1]);
 
-            console.log('Found', allBlocks.length, 'blocks total');
-            console.log('Oldest:', last10k[0], 'Newest:', last10k[last10k.length-1]);
-            console.log('10K block slots:', last10k.join(','));
+            // 3. Fetch full blocks: batch of 10, concurrency of 20
+            console.log('Fetching full blocks (batch=' + BATCH_SIZE + ', concurrency=' + CONCURRENCY + ')...');
+
+            const total = slots.length;
+            let fetched = 0;
+            let errors = 0;
+            const startTime = Date.now();
+
+            // Split slots into batches of BATCH_SIZE
+            const batches = [];
+            for (let i = 0; i < total; i += BATCH_SIZE) {
+              batches.push(slots.slice(i, i + BATCH_SIZE));
+            }
+
+            // Send one batch as JSON-RPC array
+            async function processBatch(batchSlots) {
+              const requests = batchSlots.map((slot, i) => ({
+                jsonrpc: '2.0',
+                id: i + 1,
+                method: 'getBlock',
+                params: [slot, { encoding: 'json' }],
+              }));
+
+              const res = await fetch(rpc, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-api-key': key },
+                body: JSON.stringify(requests),
+              });
+              const results = await res.json();
+              for (const r of results) {
+                if (r.error) errors++;
+                else if (r.result) fetched++;
+              }
+            }
+
+            // Worker pool — CONCURRENCY batches in flight
+            let idx = 0;
+            async function worker() {
+              while (idx < batches.length) {
+                const batch = batches[idx++];
+                await processBatch(batch);
+                const elapsed = (Date.now() - startTime) / 1000;
+                const rate = elapsed > 0 ? (fetched / elapsed).toFixed(1) : '-';
+                console.log('Progress: ' + fetched + '/' + total + '  errors:' + errors + '  ' + elapsed.toFixed(1) + 's  rate:' + rate + ' blk/s');
+              }
+            }
+
+            const workers = Array.from({ length: CONCURRENCY }, () => worker());
+            await Promise.all(workers);
+
+            const totalTime = (Date.now() - startTime) / 1000;
+            console.log('');
+            console.log('Done! Fetched ' + fetched + ' full blocks in ' + totalTime.toFixed(1) + 's');
+            console.log('Average rate: ' + (fetched / totalTime).toFixed(1) + ' blk/s, errors: ' + errors);
           "
