@@ -44,7 +44,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 "encoding": "json",
                 "transactionDetails": "full",
-                "rewards": false
+                "rewards": false,
+                "maxSupportedTransactionVersion": 0
             }
         ]
     });
