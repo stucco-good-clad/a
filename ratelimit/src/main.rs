@@ -11,9 +11,9 @@ async fn burst(
     body: &serde_json::Value,
     concurrency: usize,
 ) -> (u64, u64, u64, Duration) {
-    let success = AtomicU64::new(0);
-    let rate_limited = AtomicU64::new(0);
-    let errors = AtomicU64::new(0);
+    let success = Arc::new(AtomicU64::new(0));
+    let rate_limited = Arc::new(AtomicU64::new(0));
+    let errors = Arc::new(AtomicU64::new(0));
 
     let start = Instant::now();
 
@@ -22,6 +22,9 @@ async fn burst(
         let client = client.clone();
         let body = body.clone();
         let url = url.to_string();
+        let success = Arc::clone(&success);
+        let rate_limited = Arc::clone(&rate_limited);
+        let errors = Arc::clone(&errors);
 
         let handle = tokio::spawn(async move {
             match client.post(&url).json(&body).send().await {
@@ -78,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(30))
         .build()?;
 
-    // Sweep: start at 1, double until hitting rate-limit ceiling
+    // Sweep: powers of two then linear increments
     let levels: Vec<usize> = (0..=10)
         .map(|i| 1 << i) // 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024
         .chain(std::iter::successors(Some(1500), |&n| {
@@ -99,22 +102,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("{:-<72}", "");
 
-    let mut prev_rps = 0.0;
-
     for &conc in &levels {
         let (s, rl, er, dur) = burst(&client, &full_url, &body, conc).await;
         let total = s + rl + er;
         let dur_s = dur.as_secs_f64();
         let rps = total as f64 / dur_s.max(0.001);
-        let rps_delta = if prev_rps > 0.0 {
-            format!("{:+.0}", rps - prev_rps)
-        } else {
-            "  -".to_string()
-        };
 
         println!(
-            "{:>10} {:>10} {:>10} {:>10} {:>10} {:>8.3}s {:>8.0} {}",
-            conc, total, s, rl, er, dur_s, rps, rps_delta
+            "{:>10} {:>10} {:>10} {:>10} {:>10} {:>8.3}s {:>8.0}",
+            conc, total, s, rl, er, dur_s, rps,
         );
 
         // Stop if rate limiting kicks in heavily (>20% rate-limited)
@@ -127,8 +123,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             break;
         }
-
-        prev_rps = rps;
 
         // Small cooldown between levels
         tokio::time::sleep(Duration::from_secs(1)).await;
