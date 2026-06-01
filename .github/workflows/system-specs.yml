@@ -1,0 +1,31 @@
+name: System Specs
+
+on:
+  push:
+
+jobs:
+  specs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show runner info
+        run: |
+          echo "=== Runner ==="
+          echo "Runner: ${{ runner.name }}"
+          echo "OS: ${{ runner.os }}"
+          echo "Arch: ${{ runner.arch }}"
+          echo "Temp: ${{ runner.temp }}"
+          echo "Tool cache: ${{ runner.tool_cache }}"
+
+          echo ""
+          echo "=== Hardware ==="
+          echo "CPU:"
+          lscpu | grep -E 'Model name|CPU\(s\)|CPU max MHz|CPU family'
+          echo ""
+          echo "Memory:"
+          free -h
+          echo ""
+          echo "Disk:"
+          df -h /
+          echo ""
+          echo "Uptime:"
+          uptime
