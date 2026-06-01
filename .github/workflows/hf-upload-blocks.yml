@@ -1,0 +1,41 @@
+name: hf-upload-blocks
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download blocks.txt
+        run: |
+          curl -L -o blocks.txt \
+            "https://github.com/devakapatel/files/releases/download/1/blocks.txt"
+          ls -lh blocks.txt
+
+      - name: Install huggingface_hub
+        run: pip install huggingface_hub -q
+
+      - name: Upload to HF dataset
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -c "
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ['HF_TOKEN'])
+          api.upload_file(
+              path_or_fileobj='blocks.txt',
+              path_in_repo='blocks.txt',
+              repo_id='ammamma/gh-storage',
+              repo_type='dataset',
+          )
+          print('Uploaded blocks.txt to ammamma/gh-storage')
+          "
