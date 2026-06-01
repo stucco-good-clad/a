@@ -95,6 +95,26 @@ jobs:
           echo "=== Artifacts ready ==="
           ls -la artifacts/
 
+      - name: Create all releases sequentially (avoid rate limits)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          echo "=== Creating 20 releases sequentially ==="
+          for f in artifacts/segment_*.txt; do
+            FIRST=$(head -1 "$f")
+            LAST=$(tail -1 "$f")
+            TAG="blocks-${FIRST}-${LAST}"
+            echo "  Creating release: $TAG"
+            gh release create "$TAG" \
+              --repo "$REPO" \
+              --title "Blocks ${FIRST}-${LAST}" \
+              --notes ""
+            echo "  Done: $TAG"
+          done
+          echo "=== All 20 releases created ==="
+
       - name: Upload artifacts for workers
         uses: actions/upload-artifact@v4
         with:
@@ -103,8 +123,8 @@ jobs:
 
   # ──────────────────────────────────────────────
   # Workers: each downloads the pre-built binary +
-  # its segment file, creates an individual release,
-  # fetches 1K blocks, and uploads them.
+  # its segment file, fetches 1K blocks, and
+  # uploads to the pre-created release.
   # ──────────────────────────────────────────────
   workers:
     needs: [coordinator]
@@ -121,21 +141,14 @@ jobs:
       - name: Make binary executable
         run: chmod +x batch-blocks
 
-      - name: Create release from segment range
-        id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Determine release tag
+        id: tag
         run: |
           SEGMENT_FILE="segment_$(printf '%02d' ${{ matrix.segment }}).txt"
           FIRST=$(head -1 "$SEGMENT_FILE")
           LAST=$(tail -1 "$SEGMENT_FILE")
-          TAG="blocks-${FIRST}-${LAST}"
-          echo "Creating release: $TAG"
-          gh release create "$TAG" \
-            --repo "${{ github.repository }}" \
-            --title "Blocks ${FIRST}-${LAST} (worker ${{ matrix.segment }})" \
-            --notes ""
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "tag=blocks-${FIRST}-${LAST}" >> "$GITHUB_OUTPUT"
+          echo "Release tag: blocks-${FIRST}-${LAST}"
 
       - name: Fetch blocks
         run: ./batch-blocks --slots-file "segment_$(printf '%02d' ${{ matrix.segment }}).txt"
@@ -157,7 +170,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ steps.release.outputs.tag }}"
+          TAG="${{ steps.tag.outputs.tag }}"
           TOTAL=$(ls -1 [0-9]*.txt 2>/dev/null | wc -l)
           echo "Uploading ${TOTAL} block files to release: ${TAG}"
           if [ "$TOTAL" -eq 0 ]; then
