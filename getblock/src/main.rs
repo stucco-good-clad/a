@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             target_slot,
             {
                 "encoding": "json",
-                "transactionDetails": "signatures",
+                "transactionDetails": "full",
                 "rewards": false
             }
         ]
