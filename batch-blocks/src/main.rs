@@ -34,24 +34,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(60))
         .build()?;
 
-    // Get current slot
-    println!("Getting current slot...");
-    let body = json!({
-        "jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []
-    });
-    let resp: Value = client
-        .post(format!("{}?api_key={}", &rpc_url, keys[0]))
-        .json(&body)
-        .send()
-        .await?
-        .json()
-        .await?;
-    let current = resp["result"].as_u64().expect("failed to parse slot");
-    println!("Current slot: {}", current);
-
-    // Build finalized slot list
-    let end = current.saturating_sub(2);
-    let start = end.saturating_sub(num_blocks as u64 - 1);
+    // Use explicit range if provided (by workflow), otherwise compute from current slot
+    let (start, end) = if let (Ok(s), Ok(e)) =
+        (env::var("RANGE_START"), env::var("RANGE_END"))
+    {
+        (s.parse::<u64>()?, e.parse::<u64>()?)
+    } else {
+        // Get current slot
+        println!("Getting current slot...");
+        let body = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []
+        });
+        let resp: Value = client
+            .post(format!("{}?api_key={}", &rpc_url, keys[0]))
+            .json(&body)
+            .send()
+            .await?
+            .json()
+            .await?;
+        let current = resp["result"].as_u64().expect("failed to parse slot");
+        println!("Current slot: {}", current);
+        let end = current.saturating_sub(2);
+        let start = end.saturating_sub(num_blocks as u64 - 1);
+        (start, end)
+    };
     let slots: Vec<u64> = (start..=end).collect();
     let actual = slots.len();
 

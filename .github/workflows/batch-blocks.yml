@@ -7,6 +7,8 @@ on:
 
 env:
   RPC_URL: http://slc.rpc.orbitflare.com
+  NUM_BLOCKS: 1000
+  BATCH_SIZE: 10
 
 permissions:
   contents: write
@@ -22,10 +24,38 @@ jobs:
         with:
           workspaces: batch-blocks
 
-      - name: Fetch 1000 blocks in batches
+      - name: Get current slot and compute range
+        id: range
+        env:
+          KEY_1: ${{ secrets.KEY_1 }}
+        run: |
+          SLOT=$(curl -s -X POST "${RPC_URL}?api_key=${KEY_1}" \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"getSlot"}' \
+            | jq -r '.result')
+          echo "Current slot: ${SLOT}"
+          END=$(( SLOT - 2 ))
+          START=$(( END - NUM_BLOCKS + 1 ))
+          echo "Range: ${START}-${END}"
+          echo "start=${START}" >> "${GITHUB_OUTPUT}"
+          echo "end=${END}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create empty release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          START="${{ steps.range.outputs.start }}"
+          END="${{ steps.range.outputs.end }}"
+          gh release create "blocks-${START}-${END}" \
+            --title "Blocks ${START}-${END}" \
+            --notes ""
+
+      - name: Fetch 1000 blocks with batching 10x10 across 10 keys
         working-directory: batch-blocks
         run: cargo run --release
         env:
+          RANGE_START: ${{ steps.range.outputs.start }}
+          RANGE_END: ${{ steps.range.outputs.end }}
           KEY_1: ${{ secrets.KEY_1 }}
           KEY_2: ${{ secrets.KEY_2 }}
           KEY_3: ${{ secrets.KEY_3 }}
@@ -37,13 +67,16 @@ jobs:
           KEY_9: ${{ secrets.KEY_9 }}
           KEY_10: ${{ secrets.KEY_10 }}
 
-      - name: Create release with blocks
+      - name: Create block archive and upload to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          RANGE=$(cat batch-blocks/range.txt)
-          echo "Release range: ${RANGE}"
-          gh release create "blocks-${RANGE}" \
-            --title "Blocks ${RANGE}" \
-            --notes "Full block data for slots ${RANGE}" \
-            batch-blocks/[0-9]*.txt
+          START="${{ steps.range.outputs.start }}"
+          END="${{ steps.range.outputs.end }}"
+          TAG="blocks-${START}-${END}"
+          ARCHIVE="blocks-${START}-${END}.tar.gz"
+          echo "Creating archive: ${ARCHIVE} (max compression)"
+          tar -cf - batch-blocks/[0-9]*.txt | gzip -9 > "${ARCHIVE}"
+          echo "Archive size: $(du -h "${ARCHIVE}" | cut -f1)"
+          echo "Uploading archive to release: ${TAG}"
+          gh release upload "${TAG}" "${ARCHIVE}" --clobber
