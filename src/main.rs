@@ -101,15 +101,12 @@ async fn send_batch(
     url: &str,
     api_key: &Option<String>,
     slots: &[u64],
-    batch_size: usize,
-    offset: usize,
 ) -> Result<(usize, usize, u64), anyhow::Error> {
-    let mut batch = Vec::with_capacity(batch_size.min(slots.len().saturating_sub(offset)));
-    let len = batch_size.min(slots.len().saturating_sub(offset));
-    for i in 0..len {
-        let slot = slots[offset + i];
+    let count = slots.len();
+    let mut batch = Vec::with_capacity(count);
+    for (i, slot) in slots.iter().enumerate() {
         let params = vec![
-            json!(slot),
+            json!(*slot),
             json!({
                 "encoding": "json",
                 "transactionDetails": "full",
@@ -137,16 +134,16 @@ async fn send_batch(
     let batch_bytes = buf.len() as u64;
 
     if !status.is_success() {
-        return Ok((0, len, batch_bytes));
+        return Ok((0, count, batch_bytes));
     }
 
     let v: Value = match serde_json::from_slice(&buf) {
         Ok(v) => v,
-        Err(_) => return Ok((0, len, batch_bytes)),
+        Err(_) => return Ok((0, count, batch_bytes)),
     };
     let arr = match v.as_array() {
         Some(a) => a,
-        None => return Ok((0, len, batch_bytes)),
+        None => return Ok((0, count, batch_bytes)),
     };
 
     let mut ok = 0usize;
@@ -162,13 +159,14 @@ async fn send_batch(
 }
 
 async fn download(args: Args, run_index: usize) -> Result<RunSummary> {
-    let client = Client::builder()
+    let pool_max = (args.max_concurrent * 2).min(256);
+    let client_builder = reqwest::Client::builder()
         .user_agent("solana-backfill/0.1")
         .timeout(Duration::from_secs(args.timeout))
-        .pool_max_idle_per_host(20)
+        .pool_max_idle_per_host(pool_max)
         .pool_idle_timeout(Duration::from_secs(30))
-        .tcp_keepalive(Duration::from_secs(60))
-        .build()?;
+        .tcp_keepalive(Duration::from_secs(60));
+    let client = client_builder.build()?;
 
     let (start_slot, end_slot) = if let Some(latest_n) = args.from_latest {
         let current = get_slot(&client, &args.rpc, &args.api_key).await?;
@@ -193,26 +191,25 @@ async fn download(args: Args, run_index: usize) -> Result<RunSummary> {
     println!("[run {}] Slots {} -> {} ({} blocks) [{}/{}]", run_index + 1, start_slot, end_slot, total, batch_size, args.max_concurrent);
 
     let semaphore = std::sync::Arc::new(Semaphore::new(args.max_concurrent));
-    let mut handles = Vec::new();
+    let mut handles = Vec::with_capacity(total.div_ceil(batch_size));
     let start = Instant::now();
 
     for start_idx in (0..total).step_by(batch_size) {
         let end_idx = (start_idx + batch_size).min(total);
+        let chunk = slots[start_idx..end_idx].to_vec();
         let url = args.rpc.clone();
         let api_key = args.api_key.clone();
-        let slots = slots.clone();
         let client = client.clone();
         let permit = semaphore.clone().acquire_owned().await?;
 
         handles.push(tokio::spawn(async move {
             let _p = permit;
-            let count = end_idx - start_idx;
-            match send_batch(&client, &url, &api_key, &slots, count, start_idx).await {
+            match send_batch(&client, &url, &api_key, chunk).await {
                 Ok((ok, err, bytes)) => {
                     println!("[{}] {}->{} ok={} err={} bytes={}", run_index + 1, start_idx, end_idx - 1, ok, err, bytes);
                     (ok, err, bytes)
                 }
-                Err(_) => (0, count, 0),
+                Err(_) => (0, chunk.len(), 0),
             }
         }));
     }
