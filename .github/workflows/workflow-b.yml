@@ -36,8 +36,12 @@ jobs:
           git commit -m "B: increment counter to ${{ steps.counter.outputs.count }}"
           git push
 
-      - name: Trigger workflow A
-        uses: peter-evans/workflow-dispatch@v2
-        with:
-          workflow: workflow-a.yml
-          token: ${{ github.token }}
+      - name: Trigger workflow A via API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/workflow-a.yml/dispatches" \
+            -d '{"ref":"${{ github.ref_name }}"}'
