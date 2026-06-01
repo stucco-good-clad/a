@@ -27,11 +27,11 @@ struct Args {
     end_slot: Option<u64>,
 
     /// Number of blocks per batch
-    #[arg(short, long, default_value = "100")]
+    #[arg(short, long, default_value = "10")]
     batch_size: usize,
 
     /// Maximum concurrent batch requests
-    #[arg(short, long, default_value = "40")]
+    #[arg(short, long, default_value = "20")]
     max_concurrent: usize,
 
     /// Output directory for block JSON files
@@ -51,19 +51,12 @@ struct Args {
 struct RunResult {
     ok: usize,
     err: usize,
-    bytes: u64,
-    elapsed: Duration,
     mb_per_sec: f64,
 }
 
 impl RunResult {
-    fn new(ok: usize, err: usize, bytes: u64, elapsed: Duration) -> Self {
-        let mb_per_sec = if elapsed.as_secs_f64() > 0.0 {
-            (bytes as f64 / 1024.0 / 1024.0) / elapsed.as_secs_f64()
-        } else {
-            0.0
-        };
-        Self { ok, err, bytes, elapsed, mb_per_sec }
+    fn new(ok: usize, err: usize, mb_per_sec: f64) -> Self {
+        Self { ok, err, mb_per_sec }
     }
 }
 
