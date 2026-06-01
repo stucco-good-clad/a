@@ -1,0 +1,23 @@
+name: getBlock
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  RPC_URL: http://slc.rpc.orbitflare.com
+
+jobs:
+  getblock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo run --manifest-path getblock/Cargo.toml --release
+        env:
+          API_KEY: ${{ secrets.KEY_1 }}
