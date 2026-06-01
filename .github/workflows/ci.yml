@@ -100,8 +100,10 @@ jobs:
               });
               const results = await res.json();
               for (const r of results) {
-                if (r.error) errors++;
-                else if (r.result) fetched++;
+                if (r.error) {
+                  if (errors < 5) console.log('  ERROR:', r.error.message, '(id:', r.id, ')');
+                  errors++;
+                } else if (r.result) fetched++;
               }
             }
 
