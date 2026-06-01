@@ -33,5 +33,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-20x
-          path: release-20x.zip
+          name: release-40x
+          path: release-40x.zip
