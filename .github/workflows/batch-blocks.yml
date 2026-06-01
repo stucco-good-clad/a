@@ -81,4 +81,4 @@ jobs:
           COUNT=$(find batch-blocks -maxdepth 1 -name '[0-9]*.txt' | wc -l)
           echo "Uploading ${COUNT} block files to release: ${TAG}"
           find batch-blocks -maxdepth 1 -name '[0-9]*.txt' -print0 \
-            | xargs -0 -n 100 sh -c 'tag="$1"; shift; gh release upload "$tag" "$@" --clobber' "_" "${TAG}"
+            | xargs -0 -n 50 sh -c 'tag="$1"; shift; gh release upload "$tag" "$@" --clobber' "_" "${TAG}"

@@ -111,6 +111,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let first_slot = slots.first().copied().unwrap_or(0);
     let last_slot = slots.last().copied().unwrap_or(0);
 
+    println!();
+    println!("--- Dynamic range resolved via getBlocks ---");
+    println!("  Requested: {} blocks", num_blocks);
+    println!("  Actual range: slot {} to {} ({} blocks)", first_slot, last_slot, actual);
+
     // Output the actual range
     fs::write("range.txt", format!("{}-{}", first_slot, last_slot))?;
 
