@@ -31,7 +31,7 @@ struct Args {
     batch_size: usize,
 
     /// Maximum concurrent batch requests
-    #[arg(short, long, default_value = "20")]
+    #[arg(short, long, default_value = "40")]
     max_concurrent: usize,
 
     /// Output directory for block JSON files
