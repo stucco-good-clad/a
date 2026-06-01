@@ -90,7 +90,7 @@ jobs:
                 jsonrpc: '2.0',
                 id: i + 1,
                 method: 'getBlock',
-                params: [slot, { encoding: 'json' }],
+                params: [slot, { encoding: 'json', maxSupportedTransactionVersion: 0 }],
               }));
 
               const res = await fetch(rpc, {
