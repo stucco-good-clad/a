@@ -8,20 +8,29 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
-      options: --privileged
 
     steps:
       - name: Update system
         run: pacman -Syu --noconfirm
 
-      - name: Install base-devel and git
-        run: pacman -S --noconfirm base-devel git
+      - name: Install base packages
+        run: pacman -S --noconfirm base-devel git sudo
 
-      - name: Install yay
+      - name: Create non-root user
         run: |
-          git clone https://aur.archlinux.org/yay.git
+          useradd -m -s /bin/bash builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
+          chmod 440 /etc/sudoers.d/builder
+          mkdir -p /home/builder/.cache/yay
+          chown -R builder:builder /home/builder
+
+      - name: Install yay as non-root
+        run: |
+          su - builder -c "git clone https://aur.archlinux.org/yay.git"
           cd yay
-          makepkg -si --noconfirm
+          chown -R builder:builder .
+          su - builder -c "cd yay && makepkg -si --noconfirm"
 
       - name: Install GitHub Desktop via yay
-        run: yay -S --noconfirm github-desktop-bin
+        run: |
+          su - builder -c "yay -S --noconfirm github-desktop-bin"
