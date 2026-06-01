@@ -23,4 +23,5 @@ jobs:
         working-directory: ratelimit
         run: cargo run --release
         env:
-          API_KEY: ${{ secrets.KEY_1 }}
+          KEY_1: ${{ secrets.KEY_1 }}
+          KEY_2: ${{ secrets.KEY_2 }}
