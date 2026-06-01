@@ -3,6 +3,10 @@ on:
   push:
     paths-ignore:
       - 'counter.txt'
+  workflow_run:
+    workflows: ["CounterB"]
+    types:
+      - completed
   workflow_dispatch:
 
 permissions:
@@ -35,9 +39,3 @@ jobs:
           git add counter.txt
           git commit -m "A: increment counter to ${{ steps.counter.outputs.count }}"
           git push
-
-      - name: Trigger workflow B
-        uses: peter-evans/workflow-dispatch@v2
-        with:
-          workflow: workflow-b.yml
-          token: ${{ github.token }}
