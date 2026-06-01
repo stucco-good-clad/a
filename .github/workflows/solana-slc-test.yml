@@ -1,7 +1,6 @@
 name: Solana Backfill Benchmark
 
 on:
-  push:
   workflow_dispatch:
 
 jobs:
