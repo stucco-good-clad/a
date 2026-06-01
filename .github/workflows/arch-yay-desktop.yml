@@ -1,0 +1,26 @@
+name: Arch Linux + Yay + GitHub Desktop
+
+on:
+  push:
+
+jobs:
+  arch-yay-desktop:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Update system
+        run: pacman -Syu --noconfirm
+
+      - name: Install base-devel and git
+        run: pacman -S --noconfirm base-devel git
+
+      - name: Install yay
+        run: |
+          git clone https://aur.archlinux.org/yay.git
+          cd yay
+          makepkg -si --noconfirm
+
+      - name: Install GitHub Desktop via yay
+        run: yay -S --noconfirm github-desktop-bin
