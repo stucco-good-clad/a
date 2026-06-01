@@ -81,7 +81,13 @@ async fn get_slot(client: &Client, url: &str, api_key: &Option<String>) -> Resul
     }
     let resp = req.body(body.to_string()).send().await?;
     let v: Value = resp.json().await?;
-    Ok(v.get("result").and_then(Value::as_u64).unwrap_or(0))
+    if v.get("error").is_some() {
+        anyhow::bail!("RPC error: {}", v["error"]);
+    }
+    match v.get("result").and_then(Value::as_u64) {
+        Some(slot) if slot > 0 => Ok(slot),
+        _ => anyhow::bail!("invalid slot response from RPC"),
+    }
 }
 
 async fn send_batch(
