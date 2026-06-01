@@ -128,7 +128,7 @@ impl Endpoint {
     fn new_with_concurrency(url: String, api_key: Option<String>, args: &Args, concurrency: usize) -> Result<Self> {
         let mut a = args.clone();
         a.max_concurrent = concurrency;
-        Self::new(url, api_key, idx, &a)
+        Self::new(url, api_key, &a)
     }
 }
 
