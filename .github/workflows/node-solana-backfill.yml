@@ -1,4 +1,4 @@
-name: Node Solana Backfill
+name: Bun Solana Backfill
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  node-backfill:
+  bun-backfill:
     runs-on: ubuntu-latest
     env:
       KEY_1: ${{ secrets.KEY_1 }}
@@ -14,26 +14,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 26.x
+          bun-version: latest
 
-      - name: Install runtime deps
-        run: |
-          bun --version || true
-          node --version
-
-      - name: Run backfill (Node)
+      - name: Run backfill (Bun)
         run: |
           cd bun-solana-backfill
-          node index.js \
+          bun run index.ts \
             --start ${{ github.run_id }} \
             --end $(( ${{ github.run_id }} + 999 )) \
             --batch 20 \
-            --concurrent 20 \
+            --concur 20 \
             --tx full \
             --out ./runner.ndjson.gz \
             --rpc "http://la.rpc.orbitflare.com" \
             --api-key "$KEY_1"
+          echo "--- verify ---"
           ls -lh ./runner.ndjson.gz
-          gzip -t ./runner.ndjson.gz && echo "gzip OK"
+          file ./runner.ndjson.gz
