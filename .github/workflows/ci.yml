@@ -6,6 +6,9 @@ on:
 jobs:
   hello:
     runs-on: ubuntu-latest
+    env:
+      KEY_1: ${{ secrets.KEY_1 }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -13,5 +16,14 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Hello World
-        run: bun -e "console.log('Hello World!')"
+      - name: Get latest slot
+        run: |
+          bun -e "
+            const res = await fetch('http://sg.rpc.orbitflare.com', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', 'x-api-key': process.env.KEY_1 },
+              body: JSON.stringify({ jsonrpc:'2.0', id:1, method:'getSlot', params:[] }),
+            });
+            const json = await res.json();
+            console.log('Latest slot:', json.result);
+          "
