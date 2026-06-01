@@ -23,19 +23,36 @@ jobs:
       - name: Install huggingface_hub
         run: pip install huggingface_hub -q
 
-      - name: Upload to HF dataset
+      - name: Ensure HF dataset repo exists
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python -c "
+          python -c '
           import os
           from huggingface_hub import HfApi
-          api = HfApi(token=os.environ['HF_TOKEN'])
-          api.upload_file(
-              path_or_fileobj='blocks.txt',
-              path_in_repo='blocks.txt',
-              repo_id='ammamma/gh-storage',
-              repo_type='dataset',
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          api.create_repo(
+            repo_id="ammamma/gh-storage",
+            repo_type="dataset",
+            exist_ok=True,
+            private=False,
           )
-          print('Uploaded blocks.txt to ammamma/gh-storage')
-          "
+          print("Repo ready: ammamma/gh-storage")
+          '
+
+      - name: Upload blocks.txt to HF dataset
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -c '
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          api.upload_file(
+            path_or_fileobj="blocks.txt",
+            path_in_repo="blocks.txt",
+            repo_id="ammamma/gh-storage",
+            repo_type="dataset",
+          )
+          print("Uploaded blocks.txt to ammamma/gh-storage")
+          '
