@@ -43,7 +43,7 @@ console.log('Found', slots.length, 'block slots');
 console.log('Oldest:', slots[0], 'Newest:', slots[slots.length - 1]);
 
 // 3. Fetch full blocks: batch of 10, rate-limited 10 RPS shared across pool
-console.log(`Fetching full blocks (batch=${BATCH_SIZE}, concurrency=${CONCURRENCY}, max ${MAX_RPS} req/s)...`);
+console.log(`Fetching full blocks (batch=${BATCH_SIZE}, concurrency=${CONCURRENCY})...`);
 
 const total = slots.length;
 let fetched = 0;
