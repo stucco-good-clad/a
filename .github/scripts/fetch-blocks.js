@@ -2,7 +2,7 @@ const rpc = 'http://sg.rpc.orbitflare.com';
 const key = process.env.KEY_1;
 const TARGET = 5000;
 const BATCH_SIZE = 10;
-const MAX_RPS = 10;
+const CONCURRENCY = 20;
 
 if (!key) {
   console.error('Error: KEY_1 env var not set');
@@ -42,8 +42,8 @@ const slots = allBlocks.slice(-count);
 console.log('Found', slots.length, 'block slots');
 console.log('Oldest:', slots[0], 'Newest:', slots[slots.length - 1]);
 
-// 3. Fetch full blocks: batch of 10, rate-limited to 10 HTTP req/s
-console.log(`Fetching full blocks (batch=${BATCH_SIZE}, max ${MAX_RPS} req/s)...`);
+// 3. Fetch full blocks: batch of 10, rate-limited 10 RPS shared across pool
+console.log(`Fetching full blocks (batch=${BATCH_SIZE}, concurrency=${CONCURRENCY}, max ${MAX_RPS} req/s)...`);
 
 const total = slots.length;
 let fetched = 0;
@@ -56,26 +56,8 @@ for (let i = 0; i < total; i += BATCH_SIZE) {
   batches.push(slots.slice(i, i + BATCH_SIZE));
 }
 
-// Token-bucket rate limiter: max MAX_RPS requests per second
-const reqTimes = [];
-async function rateLimit() {
-  const now = Date.now();
-  // Remove timestamps older than 1s
-  while (reqTimes.length > 0 && reqTimes[0] <= now - 1000) {
-    reqTimes.shift();
-  }
-  if (reqTimes.length >= MAX_RPS) {
-    // Wait until the oldest timestamp expires
-    const wait = reqTimes[0] + 1000 - now + 5;
-    await new Promise(r => setTimeout(r, wait));
-  }
-  reqTimes.push(Date.now());
-}
-
 // Send one batch (10 getBlock calls in one HTTP request)
 async function sendBatch(batchSlots) {
-  await rateLimit();
-
   const requests = batchSlots.map((slot, i) => ({
     jsonrpc: '2.0',
     id: i + 1,
@@ -109,18 +91,25 @@ async function sendBatch(batchSlots) {
   }
 }
 
-// Sequential with rate limiting
+// Worker pool — 20 workers, all always busy
+let idx = 0;
 let lastLog = Date.now();
-for (let i = 0; i < batches.length; i++) {
-  await sendBatch(batches[i]);
-  const now = Date.now();
-  if (now - lastLog >= 2000) {
-    const elapsed = (now - startTime) / 1000;
-    const rate = elapsed > 0 ? (fetched / elapsed).toFixed(1) : '-';
-    console.log(`Progress: ${fetched}/${total}  errors:${errors}  ${elapsed.toFixed(1)}s  rate:${rate} blk/s`);
-    lastLog = now;
+async function worker() {
+  while (idx < batches.length) {
+    const batch = batches[idx++];
+    await sendBatch(batch);
+    const now = Date.now();
+    if (now - lastLog >= 2000) {
+      const elapsed = (now - startTime) / 1000;
+      const rate = elapsed > 0 ? (fetched / elapsed).toFixed(1) : '-';
+      console.log(`Progress: ${fetched}/${total}  errors:${errors}  ${elapsed.toFixed(1)}s  rate:${rate} blk/s`);
+      lastLog = now;
+    }
   }
 }
+
+const pool = Array.from({ length: CONCURRENCY }, () => worker());
+await Promise.all(pool);
 
 const totalTime = (Date.now() - startTime) / 1000;
 console.log('');
