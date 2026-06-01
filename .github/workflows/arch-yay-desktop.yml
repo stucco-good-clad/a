@@ -24,13 +24,10 @@ jobs:
           mkdir -p /home/builder/.cache/yay
           chown -R builder:builder /home/builder
 
-      - name: Install yay as non-root
+      - name: Install yay and GitHub Desktop
         run: |
           su - builder -c "git clone https://aur.archlinux.org/yay.git"
           cd yay
           chown -R builder:builder .
           su - builder -c "cd yay && makepkg -si --noconfirm"
-
-      - name: Install GitHub Desktop via yay
-        run: |
           su - builder -c "yay -S --noconfirm github-desktop-bin"
