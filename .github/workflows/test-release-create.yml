@@ -7,7 +7,7 @@ on:
 
 permissions:
   actions: write
-  contents: write
+  contents: read
 
 jobs:
   test:
@@ -22,15 +22,16 @@ jobs:
           ORIG=$(stat -c%s release.zip)
           echo "Original: $((ORIG / 1048576)) MB ($ORIG bytes)"
 
-      - name: Probe size limit (create + delete releases)
+      - name: Probe artifact size limit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           REPO="${{ github.repository }}"
+          RUN_ID="${{ github.run_id }}"
           ORIG_SIZE=$(stat -c%s release.zip)
           MB=$((ORIG_SIZE / 1048576))
-          echo "Original: ${MB} MB"
+          echo "REPO=$REPO RUN_ID=$RUN_ID Original=${MB}MB"
 
           for i in $(seq 0 15); do
             NUM_COPIES=$((2 ** i))
@@ -54,25 +55,40 @@ jobs:
               break
             fi
 
-            echo "  Attempting upload..."
-            if gh release create "probe-${ZIP_MB}MB-${NUM_COPIES}x" \
-              --repo "$REPO" \
-               --title "Probe ${ZIP_MB} MB (${NUM_COPIES} copies)" \
-              --notes "Size limit probe" \
-              "$zip_name"; then
-              echo "  ✓ Uploaded (${ZIP_MB} MB)"
-              gh release delete "probe-${ZIP_MB}MB-${NUM_COPIES}x" \
-                --repo "$REPO" --yes || true
-              echo "  Deleted after upload"
-            else
-              echo "  ✗ Upload FAILED at ${ZIP_MB} MB"
-              echo ""
-              echo "========== LIMIT FOUND =========="
-              echo "Last successful: iteration $((i-1)) ($((ZIP_MB / 2)) MB)"
-              echo "Failed at: ${ZIP_MB} MB (${NUM_COPIES} copies)"
-              rm -rf work "$zip_name" release.zip
-              exit 0
+            echo "  Creating artifact resource..."
+            CREATE_RESP=$(gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
+              -f "name=probe-${ZIP_MB}MB" \
+              -f "archive_format=zip" 2>&1) || {
+                echo "  ✗ CREATE FAILED at ${ZIP_MB} MB"
+                echo "  Error: $CREATE_RESP"
+                echo ""
+                echo "========== LIMIT FOUND =========="
+                echo "Last successful: iteration $((i-1)) ($((ZIP_MB / 2)) MB)"
+                echo "Failed at: ${ZIP_MB} MB (${NUM_COPIES} copies)"
+                rm -rf work "$zip_name" release.zip
+                exit 0
+              }
+
+            ARTIFACT_ID=$(echo "$CREATE_RESP" | jq -r '.id')
+            UPLOAD_URL=$(echo "$CREATE_RESP" | jq -r '.upload_url // empty')
+
+            if [ -n "$UPLOAD_URL" ] && [ "$UPLOAD_URL" != "null" ]; then
+              echo "  Uploading zip..."
+              curl -s -X PUT \
+                -H "Content-Type: application/zip" \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                --data-binary @"$zip_name" \
+                "$UPLOAD_URL" > /dev/null
+              echo "  ✓ Uploaded (id: $ARTIFACT_ID, ${ZIP_MB} MB)"
             fi
+
+            # Delete artifact via API
+            gh api --method DELETE \
+              "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}" > /dev/null 2>&1 || true
+            echo "  Deleted artifact $ARTIFACT_ID"
 
             rm -rf "$dir" "$zip_name"
           done
