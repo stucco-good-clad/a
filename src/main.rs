@@ -76,7 +76,7 @@ struct Args {
     compress: bool,
 
     /// Writer queue depth
-    #[arg(long, default_value = "512")]
+    #[arg(long, default_value = "2048")]
     write_queue: usize,
 
     /// Suppress per-batch lines
@@ -370,6 +370,19 @@ async fn run_download(
     let retries   = args.retries;
     let tx_detail = args.tx_detail.clone();
 
+    // Probe all endpoints, rank by getSlot latency (fastest first)
+    let mut ep_order: Vec<usize> = (0..n_ep).collect();
+    if n_ep > 1 {
+        let mut latencies: Vec<(usize, f64)> = Vec::new();
+        for (i, ep) in endpoints.iter().enumerate() {
+            let t0 = Instant::now();
+            let _ = get_slot(ep).await;
+            latencies.push((i, t0.elapsed().as_secs_f64() * 1000.0));
+        }
+        latencies.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        ep_order = latencies.into_iter().map(|(i, _)| i).collect();
+    }
+
     let num_batches = total.div_ceil(batch_size);
     let mut handles = Vec::with_capacity(num_batches);
 
@@ -377,9 +390,10 @@ async fn run_download(
         let end_idx = (start_idx + batch_size).min(total);
         let chunk: Vec<u64> = ((start_slot + start_idx as u64)..(start_slot + end_idx as u64)).collect();
 
-        let ep_idx   = batch_idx % n_ep;
-        let ep       = Arc::clone(&endpoints[ep_idx]);
-        let sem      = Arc::clone(&sems[ep_idx]);
+        let ep_rank = batch_idx % ep_order.len();
+        let ep_real_idx = ep_order[ep_rank];
+        let ep       = Arc::clone(&endpoints[ep_real_idx]);
+        let sem      = Arc::clone(&sems[ep_real_idx]);
         let write_tx = write_tx.clone();
         let tx_det   = tx_detail.clone();
         let lbl      = label.to_string();
@@ -408,13 +422,13 @@ async fn run_download(
             let done = c_done.fetch_add(ok + err + skip, Ordering::Relaxed) + ok + err + skip;
 
             if !lines.is_empty() {
-                let _ = write_tx.try_send(WriteJob { path: out_path, lines, compress });
+                let _ = write_tx.send(WriteJob { path: out_path, lines, compress }).await;
             }
 
             if !quiet {
                 if timing {
                     eprintln!(
-                        "[{lbl}][ep{ep_idx}] #{batch_idx:<4} \
+                        "[{lbl}][ep{ep_real_idx}] #{batch_idx:<4} \
 sem_wait={sem_wait_ms:.0}ms ratelim_wait={:.0}ms \
 ttfb={:.0}ms body={:.0}ms parse={:.0}ms enc={:.0}ms \
 wire={:.1}KB  ok={ok} done={done}",
@@ -422,11 +436,11 @@ bt.wait_ms, bt.ttfb_ms, bt.body_ms, bt.parse_ms, bt.encode_ms, bt.wire_kb,
                     );
                 } else {
                     eprintln!(
-                        "[{lbl}][ep{ep_idx}] #{batch_idx:<4} slots {}-{}  \
-ok={ok} err={err} skip={skip} wire={:.1}KB done={done}/{}",
-chunk.first().unwrap_or(&0), chunk.last().unwrap_or(&0),
-                              bytes as f64 / 1024.0, total,
-                    );
+                        "[{lbl}][ep{ep_real_idx}] #{batch_idx:<4} slots {}-{}
+                    ok={ok} err={err} skip={skip} wire={:.1}KB done={done}/{}",
+                    chunk.first().unwrap_or(&0), chunk.last().unwrap_or(&0),
+                                  bytes as f64 / 1024.0, total,
+                        );
                 }
             }
         }));
