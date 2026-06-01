@@ -19,8 +19,6 @@ async fn burst_split(
 
     let key_success: Vec<Arc<AtomicU64>> = (0..n_keys).map(|_| Arc::new(AtomicU64::new(0))).collect();
     let key_rl: Vec<Arc<AtomicU64>> = (0..n_keys).map(|_| Arc::new(AtomicU64::new(0))).collect();
-    let key_errors: Vec<Arc<AtomicU64>> = (0..n_keys).map(|_| Arc::new(AtomicU64::new(0))).collect();
-    let key_printed: Vec<Arc<AtomicU64>> = (0..n_keys).map(|_| Arc::new(AtomicU64::new(0))).collect();
 
     let start = Instant::now();
 
@@ -35,8 +33,6 @@ async fn burst_split(
         let errors = Arc::clone(&errors);
         let key_success: Vec<Arc<AtomicU64>> = key_success.iter().map(|a| Arc::clone(a)).collect();
         let key_rl: Vec<Arc<AtomicU64>> = key_rl.iter().map(|a| Arc::clone(a)).collect();
-        let key_errors: Vec<Arc<AtomicU64>> = key_errors.iter().map(|a| Arc::clone(a)).collect();
-        let key_printed: Vec<Arc<AtomicU64>> = key_printed.iter().map(|a| Arc::clone(a)).collect();
 
         let handle = tokio::spawn(async move {
             let key_idx = i % n_keys;
@@ -44,34 +40,18 @@ async fn burst_split(
 
             match client.post(&url).json(&body).send().await {
                 Ok(resp) => {
-                    let status = resp.status();
-                    if status == 429 {
+                    if resp.status() == 429 {
                         rate_limited.fetch_add(1, Ordering::Relaxed);
                         key_rl[key_idx].fetch_add(1, Ordering::Relaxed);
-                    } else if status.is_success() {
+                    } else if resp.status().is_success() {
                         success.fetch_add(1, Ordering::Relaxed);
                         key_success[key_idx].fetch_add(1, Ordering::Relaxed);
                     } else {
                         errors.fetch_add(1, Ordering::Relaxed);
-                        key_errors[key_idx].fetch_add(1, Ordering::Relaxed);
-                        // Print first error per key
-                        if key_printed[key_idx].fetch_add(1, Ordering::Relaxed) < 2 {
-                            let text = resp.text().await.unwrap_or_default();
-                            println!(
-                                "  [key{}] HTTP {} -> {}",
-                                key_idx + 1,
-                                status.as_u16(),
-                                &text[..text.len().min(120)]
-                            );
-                        }
                     }
                 }
-                Err(e) => {
+                Err(_) => {
                     errors.fetch_add(1, Ordering::Relaxed);
-                    key_errors[key_idx].fetch_add(1, Ordering::Relaxed);
-                    if key_printed[key_idx].fetch_add(1, Ordering::Relaxed) < 2 {
-                        println!("  [key{}] connection error: {}", key_idx + 1, e);
-                    }
                 }
             }
         });
@@ -87,8 +67,7 @@ async fn burst_split(
     for idx in 0..n_keys {
         let s = key_success[idx].load(Ordering::Relaxed);
         let r = key_rl[idx].load(Ordering::Relaxed);
-        let e = key_errors[idx].load(Ordering::Relaxed);
-        print!("key{}: {:>4} ok, {:>4} rl, {:>4} err  ", idx + 1, s, r, e);
+        print!("key{}: {:>4} ok, {:>4} rl  ", idx + 1, s, r);
     }
     println!();
 
