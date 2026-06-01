@@ -1,0 +1,40 @@
+name: Node Solana Backfill
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  node-backfill:
+    runs-on: ubuntu-latest
+    env:
+      KEY_1: ${{ secrets.KEY_1 }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.x
+          cache: npm
+
+      - name: Install runtime deps
+        run: |
+          bun --version || true
+          node --version
+
+      - name: Run backfill (Node)
+        run: |
+          cd bun-solana-backfill
+          node index.js \
+            --start ${{ github.run_id }} \
+            --end $(( ${{ github.run_id }} + 999 )) \
+            --batch 20 \
+            --concurrent 20 \
+            --tx full \
+            --out ./runner.ndjson.gz \
+            --rpc "http://la.rpc.orbitflare.com" \
+            --api-key "$KEY_1"
+          ls -lh ./runner.ndjson.gz
+          gzip -t ./runner.ndjson.gz && echo "gzip OK"
