@@ -25,3 +25,5 @@ jobs:
         env:
           KEY_1: ${{ secrets.KEY_1 }}
           KEY_2: ${{ secrets.KEY_2 }}
+          KEY_3: ${{ secrets.KEY_3 }}
+          KEY_4: ${{ secrets.KEY_4 }}
