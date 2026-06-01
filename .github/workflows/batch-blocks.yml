@@ -2,8 +2,6 @@ name: batch-blocks
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
 
 env:
   RPC_URL: http://slc.rpc.orbitflare.com
