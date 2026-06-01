@@ -93,7 +93,7 @@ jobs:
           echo "=== Artifacts ready ==="
           ls -la artifacts/
 
-      - name: Create all releases sequentially (with 1s cooldown)
+      - name: Create all releases sequentially (with 1h rate-limit retry)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -104,11 +104,22 @@ jobs:
             LAST=$(tail -1 "$f")
             TAG="blocks-${FIRST}-${LAST}"
             echo "  Creating release: $TAG"
-            gh release create "$TAG" \
-              --repo "$REPO" \
-              --title "Blocks ${FIRST}-${LAST}" \
-              --notes ""
-            echo "  Done: $TAG"
+            for attempt in 1 2 3; do
+              if output=$(gh release create "$TAG" \
+                --repo "$REPO" \
+                --title "Blocks ${FIRST}-${LAST}" \
+                --notes "" 2>&1); then
+                echo "  Done: $TAG"
+                break
+              fi
+              if echo "$output" | grep -qi "rate limit exceeded"; then
+                echo "  Rate limited. Waiting 1h before retry (attempt $attempt/3)..."
+                sleep 3600
+              else
+                echo "  Non-rate-limit error: $output"
+                exit 1
+              fi
+            done
             sleep 1
           done
           echo "=== All 20 releases created ==="
