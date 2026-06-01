@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -6,7 +6,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
-use tracing::{error, info};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -176,7 +175,10 @@ async fn download_blocks(args: Args) -> Result<RunResult> {
     let output_dir = PathBuf::from(args.output);
     fs::create_dir_all(&output_dir)?;
 
-    info!("Slots {} -> {} ({} blocks)", start_slot, end_slot, total);
+    println!(
+        "Slots {} -> {} ({} blocks)",
+        start_slot, end_slot, total
+    );
 
     let semaphore = std::sync::Arc::new(Semaphore::new(args.max_concurrent));
     let mut handles = Vec::new();
@@ -226,7 +228,7 @@ async fn main() -> Result<()> {
 
     let result = download_blocks(args).await?;
 
-    info!(
+    println!(
         "Done: {} ok, {} err, {:.2} MB/s",
         result.ok, result.err, result.mb_per_sec
     );
