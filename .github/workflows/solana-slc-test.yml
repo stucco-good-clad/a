@@ -18,7 +18,7 @@ jobs:
       - name: Build release
         run: cargo build --release
 
-      # ── Warm up connections (1 batch each endpoint, doesn't count) ──────────
+      # ── Warmup SLC (always runs) ─────────────────────────────────────────────
       - name: Warmup SLC
         run: |
           ./target/release/solana-backfill \
@@ -28,17 +28,18 @@ jobs:
         env:
           KEY_1: ${{ secrets.KEY_1 }}
 
+      # ── Warmup LA ─────────────────────────────────────────────────────────────
       - name: Warmup LA
         run: |
           ./target/release/solana-backfill \
-            --rpc "http://la.rpc.orbitflare.com" --api-key "$KEY_2" \
+            --rpc "http://la.rpc.orbitflare.com" --api-key "$KEY_1" \
             --from-latest 10 --batch-size 10 --max-concurrent 2 \
             --quiet --output ./warmup_la
         env:
-          KEY_2: ${{ secrets.KEY_2 }}
+          KEY_1: ${{ secrets.KEY_1 }}
 
-      # ── Timing diagnostic (tells us where time actually goes) ────────────────
-      - name: Timing diagnostic — SLC batch=10 concurrency=20
+      # ── Timing diagnostic ────────────────────────────────────────────────────
+      - name: "Diagnostic: SLC timing breakdown"
         run: |
           ./target/release/solana-backfill \
             --rpc "http://slc.rpc.orbitflare.com" --api-key "$KEY_1" \
@@ -49,7 +50,7 @@ jobs:
           KEY_1: ${{ secrets.KEY_1 }}
 
       # ── Single-endpoint grid ─────────────────────────────────────────────────
-      - name: SLC — batch=10 concurrency=20
+      - name: "SLC: batch=10 concurrency=20"
         run: |
           ./target/release/solana-backfill \
             --rpc "http://slc.rpc.orbitflare.com" --api-key "$KEY_1" \
@@ -59,7 +60,7 @@ jobs:
         env:
           KEY_1: ${{ secrets.KEY_1 }}
 
-      - name: SLC — batch=20 concurrency=20
+      - name: "SLC: batch=20 concurrency=20"
         run: |
           ./target/release/solana-backfill \
             --rpc "http://slc.rpc.orbitflare.com" --api-key "$KEY_1" \
@@ -69,7 +70,7 @@ jobs:
         env:
           KEY_1: ${{ secrets.KEY_1 }}
 
-      - name: SLC — batch=50 concurrency=10
+      - name: "SLC: batch=50 concurrency=10"
         run: |
           ./target/release/solana-backfill \
             --rpc "http://slc.rpc.orbitflare.com" --api-key "$KEY_1" \
@@ -79,53 +80,53 @@ jobs:
         env:
           KEY_1: ${{ secrets.KEY_1 }}
 
-      # ── Dual-endpoint (2× effective RPS ceiling) ─────────────────────────────
-      - name: SLC+LA — batch=10 concurrency=20 per endpoint
+      # ── Dual-endpoint ────────────────────────────────────────────────────────
+      - name: "SLC+LA: batch=10 concurrency=20"
         run: |
           ./target/release/solana-backfill \
             --rpc "http://slc.rpc.orbitflare.com" --api-key "$KEY_1" \
-            --rpc "http://la.rpc.orbitflare.com"  --api-key "$KEY_2" \
+            --rpc "http://la.rpc.orbitflare.com"  --api-key "$KEY_1" \
             --from-latest 1000 --batch-size 10 --max-concurrent 20 \
             --quiet --output ./blocks_dual_b10c20 \
             2>&1 | tee result_dual_b10c20.txt
         env:
           KEY_1: ${{ secrets.KEY_1 }}
-          KEY_2: ${{ secrets.KEY_2 }}
 
-      - name: SLC+LA — batch=20 concurrency=20 per endpoint
+      - name: "SLC+LA: batch=20 concurrency=20"
         run: |
           ./target/release/solana-backfill \
             --rpc "http://slc.rpc.orbitflare.com" --api-key "$KEY_1" \
-            --rpc "http://la.rpc.orbitflare.com"  --api-key "$KEY_2" \
+            --rpc "http://la.rpc.orbitflare.com"  --api-key "$KEY_1" \
             --from-latest 1000 --batch-size 20 --max-concurrent 20 \
             --quiet --output ./blocks_dual_b20c20 \
             2>&1 | tee result_dual_b20c20.txt
         env:
           KEY_1: ${{ secrets.KEY_1 }}
-          KEY_2: ${{ secrets.KEY_2 }}
 
-      # ── Collate results ───────────────────────────────────────────────────────
+      # ── Summary ──────────────────────────────────────────────────────────────
       - name: Collate summary
+        if: always()
         run: |
-          echo "====== TIMING DIAGNOSTIC ======"  > summary.txt
-          cat diag_slc.txt                        >> summary.txt
-          echo ""                                 >> summary.txt
-
-          echo "====== RESULTS ======"            >> summary.txt
-          for f in result_*.txt; do
-            echo "--- $f ---"                     >> summary.txt
-            grep -E "done|blk/s|MB/s|ok=|wire"  "$f" >> summary.txt
-            echo ""                               >> summary.txt
-          done
-
+          {
+            echo "====== TIMING DIAGNOSTIC ======"
+            cat diag_slc.txt 2>/dev/null || echo "(skipped)"
+            echo ""
+            echo "====== RESULTS ======"
+            for f in result_*.txt; do
+              [ -f "$f" ] || continue
+              echo "--- $f ---"
+              grep -E "done|blk/s|MB/s|ok=|wire|theoretical" "$f" || true
+              echo ""
+            done
+          } > summary.txt
           cat summary.txt
 
-      # ── Upload everything ─────────────────────────────────────────────────────
+      # ── Upload block data ────────────────────────────────────────────────────
       - name: Upload block data
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: blocks-${{ github.run_id }}
-          # Upload actual block data dirs — exclude warmup/diag
           path: |
             blocks_slc_b10c20/
             blocks_slc_b20c20/
@@ -133,9 +134,10 @@ jobs:
             blocks_dual_b10c20/
             blocks_dual_b20c20/
           retention-days: 90
-          compression-level: 0   # already gzipped by the tool
+          compression-level: 0   # files are already gzipped
 
       - name: Upload benchmark summary
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-summary-${{ github.run_id }}

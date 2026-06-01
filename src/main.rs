@@ -105,11 +105,10 @@ struct Endpoint {
     api_key: Option<String>,
     client:  Client,
     limiter: Arc<DefaultDirectRateLimiter>,
-    idx:     usize,
 }
 
 impl Endpoint {
-    fn new(url: String, api_key: Option<String>, idx: usize, args: &Args) -> Result<Self> {
+    fn new(url: String, api_key: Option<String>, args: &Args) -> Result<Self> {
         let pool_size = (args.max_concurrent * 2).min(256);
         let client = Client::builder()
         .user_agent("solana-backfill/0.5")
@@ -123,10 +122,10 @@ impl Endpoint {
 
         let rps = NonZeroU32::new(args.rps).unwrap_or(NonZeroU32::new(10).unwrap());
         let limiter = Arc::new(RateLimiter::direct(Quota::per_second(rps)));
-        Ok(Self { url, api_key, client, limiter, idx })
+        Ok(Self { url, api_key, client, limiter })
     }
 
-    fn new_with_concurrency(url: String, api_key: Option<String>, idx: usize, args: &Args, concurrency: usize) -> Result<Self> {
+    fn new_with_concurrency(url: String, api_key: Option<String>, args: &Args, concurrency: usize) -> Result<Self> {
         let mut a = args.clone();
         a.max_concurrent = concurrency;
         Self::new(url, api_key, idx, &a)
@@ -461,12 +460,10 @@ async fn run_bench(args: &Args) -> Result<()> {
     eprintln!("Endpoints: {}", args.rpc.len());
 
     // Resolve tip once
-    let first_ep_args = args.clone();
     let probe_ep = Arc::new(Endpoint::new(
         args.rpc[0].clone(),
                                           args.api_key.first().cloned().filter(|s: &String| !s.is_empty()),
-                                          0,
-                                          &first_ep_args,
+                                          &args,
     )?);
     let tip = get_slot(&probe_ep).await?;
     let start_slot = tip.saturating_sub(args.bench_slots as u64 - 1);
@@ -488,7 +485,7 @@ async fn run_bench(args: &Args) -> Result<()> {
             let endpoints: Vec<Arc<Endpoint>> = args.rpc.iter().enumerate()
             .map(|(i, url)| {
                 let key = args.api_key.get(i).cloned().filter(|s: &String| !s.is_empty());
-                Endpoint::new_with_concurrency(url.clone(), key, i, args, cc).map(Arc::new)
+                Endpoint::new_with_concurrency(url.clone(), key, args, cc).map(Arc::new)
             })
             .collect::<Result<_>>()?;
 
@@ -549,7 +546,7 @@ async fn download(args: &Args) -> Result<()> {
     let endpoints: Vec<Arc<Endpoint>> = args.rpc.iter().enumerate()
     .map(|(i, url)| {
         let key = args.api_key.get(i).cloned().filter(|s: &String| !s.is_empty());
-        Endpoint::new(url.clone(), key, i, args).map(Arc::new)
+        Endpoint::new(url.clone(), key, args).map(Arc::new)
     })
     .collect::<Result<_>>()?;
 
