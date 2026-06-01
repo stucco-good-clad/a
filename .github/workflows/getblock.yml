@@ -2,8 +2,6 @@ name: getBlock
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
 
 env:
   RPC_URL: http://slc.rpc.orbitflare.com
@@ -19,6 +17,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: getblock
 
       - name: Fetch block
         working-directory: getblock
