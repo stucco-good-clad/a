@@ -1,8 +1,6 @@
 name: CounterA
 on:
   push:
-    paths-ignore:
-      - 'counter.txt'
   workflow_run:
     workflows: ["CounterB"]
     types:
