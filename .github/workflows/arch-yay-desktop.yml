@@ -25,9 +25,10 @@ jobs:
           chown -R builder:builder /home/builder
 
       - name: Install yay and GitHub Desktop
+        env:
+          YAY_DIR: /home/builder/yay
         run: |
-          su - builder -c "git clone https://aur.archlinux.org/yay.git"
-          cd yay
-          chown -R builder:builder .
-          su - builder -c "cd yay && makepkg -si --noconfirm"
+          su - builder -c "git clone https://aur.archlinux.org/yay.git $YAY_DIR"
+          chown -R builder:builder "$YAY_DIR"
+          su - builder -c "cd $YAY_DIR && makepkg -si --noconfirm"
           su - builder -c "yay -S --noconfirm github-desktop-bin"
