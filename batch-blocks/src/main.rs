@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         slot,
                         {
                             "encoding": "json",
-                            "transactionDetails": "signatures",
+                            "transactionDetails": "full",
                             "rewards": false,
                             "maxSupportedTransactionVersion": 0
                         }
