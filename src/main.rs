@@ -27,7 +27,7 @@ struct Args {
     end_slot: Option<u64>,
 
     /// Number of blocks per batch
-    #[arg(short, long, default_value = "10")]
+    #[arg(short, long, default_value = "50")]
     batch_size: usize,
 
     /// Maximum concurrent batch requests
@@ -52,11 +52,12 @@ struct RunResult {
     ok: usize,
     err: usize,
     mb_per_sec: f64,
+    elapsed: f64,
 }
 
 impl RunResult {
-    fn new(ok: usize, err: usize, mb_per_sec: f64) -> Self {
-        Self { ok, err, mb_per_sec }
+    fn new(ok: usize, err: usize, mb_per_sec: f64, elapsed: f64) -> Self {
+        Self { ok, err, mb_per_sec, elapsed }
     }
 }
 
@@ -153,6 +154,9 @@ async fn download_blocks(args: Args) -> Result<RunResult> {
     let client = Client::builder()
         .user_agent("solana-backfill/0.1")
         .timeout(Duration::from_secs(args.timeout))
+        .pool_max_idle_per_host(20)
+        .pool_idle_timeout(Duration::from_secs(30))
+        .tcp_keepalive(Duration::from_secs(60))
         .build()?;
 
     let (start_slot, end_slot) = if let Some(latest_n) = args.from_latest {
@@ -176,8 +180,8 @@ async fn download_blocks(args: Args) -> Result<RunResult> {
     fs::create_dir_all(&output_dir)?;
 
     println!(
-        "Slots {} -> {} ({} blocks)",
-        start_slot, end_slot, total
+        "Slots {} -> {} ({} blocks) [{}/{}]",
+        start_slot, end_slot, total, batch_size, args.max_concurrent
     );
 
     let semaphore = std::sync::Arc::new(Semaphore::new(args.max_concurrent));
@@ -214,14 +218,14 @@ async fn download_blocks(args: Args) -> Result<RunResult> {
         }
     }
 
-    let elapsed = start.elapsed();
-    let mb_per_sec = if elapsed.as_secs_f64() > 0.0 {
-        (total_bytes as f64 / 1024.0 / 1024.0) / elapsed.as_secs_f64()
+    let elapsed = start.elapsed().as_secs_f64();
+    let mb_per_sec = if elapsed > 0.0 {
+        (total_bytes as f64 / 1024.0 / 1024.0) / elapsed
     } else {
         0.0
     };
 
-    Ok(RunResult::new(total_ok, total_err, mb_per_sec))
+    Ok(RunResult::new(total_ok, total_err, mb_per_sec, elapsed))
 }
 
 #[tokio::main]
@@ -231,8 +235,8 @@ async fn main() -> Result<()> {
     let result = download_blocks(args).await?;
 
     println!(
-        "Done: {} ok, {} err, {:.2} MB/s",
-        result.ok, result.err, result.mb_per_sec
+        "Done: {} ok, {} err, {:.2} MB/s in {:.2}s",
+        result.ok, result.err, result.mb_per_sec, result.elapsed
     );
 
     Ok(())
