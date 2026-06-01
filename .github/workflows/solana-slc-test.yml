@@ -14,6 +14,12 @@ jobs:
       - run: ./target/release/solana-backfill --rpc "http://slc.rpc.orbitflare.com" --api-key "$KEY_1" --from-latest 1000 --batch-size 10 --max-concurrent 20 --output ./blocks_10x20
         env:
           KEY_1: ${{ secrets.KEY_1 }}
+      - run: ./target/release/solana-backfill --rpc "http://slc.rpc.orbitflare.com" --api-key "$KEY_1" --from-latest 1000 --batch-size 10 --max-concurrent 30 --output ./blocks_10x30
+        env:
+          KEY_1: ${{ secrets.KEY_1 }}
       - run: ./target/release/solana-backfill --rpc "http://slc.rpc.orbitflare.com" --api-key "$KEY_1" --from-latest 1000 --batch-size 20 --max-concurrent 20 --output ./blocks_20x20
+        env:
+          KEY_1: ${{ secrets.KEY_1 }}
+      - run: ./target/release/solana-backfill --rpc "http://slc.rpc.orbitflare.com" --api-key "$KEY_1" --from-latest 1000 --batch-size 30 --max-concurrent 30 --output ./blocks_30x30
         env:
           KEY_1: ${{ secrets.KEY_1 }}
