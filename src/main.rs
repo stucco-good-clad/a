@@ -110,7 +110,9 @@ fn build_client(args: &Args) -> Result<Client> {
     .tcp_nodelay(true)                          // no Nagle — we send large bodies
     .pool_max_idle_per_host(pool_max)
     .pool_idle_timeout(Duration::from_secs(30))
-    .http2_prior_knowledge()                    // skip TLS ALPN negotiation round-trip where supported
+    // http2_prior_knowledge() omitted: only works if the server speaks H2 on plain HTTP.
+    // Most Solana RPC providers (including plain http://) use HTTP/1.1; hyper will
+    // negotiate H2 automatically on TLS (https://) endpoints via ALPN.
     .build()
     .context("failed to build HTTP client")
 }
