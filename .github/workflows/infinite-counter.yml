@@ -1,0 +1,38 @@
+name: infinite-counter
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  count:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ github.token }}
+
+      - name: Increment counter
+        run: |
+          set -euo pipefail
+          FILE="counter.txt"
+          if [ -f "$FILE" ]; then
+            NUM=$(cat "$FILE")
+          else
+            NUM=0
+          fi
+          NEXT=$((NUM + 1))
+          echo "$NEXT" > "$FILE"
+          echo "Counter: $NUM -> $NEXT"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add counter.txt
+          git commit -m "Increment counter to $(cat counter.txt)"
+          git push
