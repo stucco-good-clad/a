@@ -132,6 +132,7 @@ jobs:
           TAG="blocks-${FIRST}-${LAST}"
           echo "Creating release: $TAG"
           gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
             --title "Blocks ${FIRST}-${LAST} (worker ${{ matrix.segment }})" \
             --notes ""
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -171,7 +172,7 @@ jobs:
             if [[ ${#files[@]} -eq 50 ]]; then
               BATCH=$((BATCH + 1))
               echo "  Batch ${BATCH}: uploading ${#files[@]} files..."
-              gh release upload "${TAG}" "${files[@]}" --clobber
+              gh release upload "${TAG}" "${files[@]}" --clobber --repo "${{ github.repository }}"
               UPLOADED=$((UPLOADED + ${#files[@]}))
               echo "  Batch ${BATCH}: done (${UPLOADED}/${TOTAL})"
               files=()
@@ -180,7 +181,7 @@ jobs:
           if [[ ${#files[@]} -gt 0 ]]; then
             BATCH=$((BATCH + 1))
             echo "  Batch ${BATCH}: uploading ${#files[@]} files..."
-            gh release upload "${TAG}" "${files[@]}" --clobber
+            gh release upload "${TAG}" "${files[@]}" --clobber --repo "${{ github.repository }}"
             UPLOADED=$((UPLOADED + ${#files[@]}))
             echo "  Batch ${BATCH}: done (${UPLOADED}/${TOTAL})"
           fi
