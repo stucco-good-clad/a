@@ -25,11 +25,11 @@ jobs:
         run: |
           mkdir -p copies
           cp release.zip copies/
-          for i in $(seq 1 19); do
+          for i in $(seq 1 39); do
             cp release.zip copies/copy_${i}.zip
           done
-          zip -0 -q -q release-20x.zip copies/*
-          ls -lh release-20x.zip
+          zip -0 -q -q release-40x.zip copies/*
+          ls -lh release-40x.zip
 
       - uses: actions/upload-artifact@v4
         with:
