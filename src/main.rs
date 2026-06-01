@@ -214,9 +214,13 @@ async fn download_blocks(args: Args) -> Result<RunResult> {
     }
 
     let elapsed = start.elapsed();
-    let bytes = total_blocks_written * 1024;
+    let mb_per_sec = if elapsed.as_secs_f64() > 0.0 {
+        ((total_blocks_written * 1024) as f64 / 1024.0 / 1024.0) / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
 
-    Ok(RunResult::new(total_ok, total_err, bytes, elapsed))
+    Ok(RunResult::new(total_ok, total_err, mb_per_sec))
 }
 
 #[tokio::main]
