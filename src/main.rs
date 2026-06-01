@@ -204,7 +204,7 @@ async fn download(args: Args, run_index: usize) -> Result<RunSummary> {
 
         handles.push(tokio::spawn(async move {
             let _p = permit;
-            match send_batch(&client, &url, &api_key, chunk).await {
+            match send_batch(&client, &url, &api_key, &chunk).await {
                 Ok((ok, err, bytes)) => {
                     println!("[{}] {}->{} ok={} err={} bytes={}", run_index + 1, start_idx, end_idx - 1, ok, err, bytes);
                     (ok, err, bytes)
