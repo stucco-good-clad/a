@@ -21,10 +21,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(!keys.is_empty(), "At least KEY_1 must be set");
     let n_keys = keys.len();
 
-    let num_blocks: usize = env::var("NUM_BLOCKS")
-        .unwrap_or_else(|_| "1000".to_string())
-        .parse()
-        .unwrap_or(1000);
     let batch_size: usize = env::var("BATCH_SIZE")
         .unwrap_or_else(|_| "10".to_string())
         .parse()
@@ -34,78 +30,100 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(120))
         .build()?;
 
-    // Determine the base slot range (end is finalized, start is a wide search window)
-    let search_end = if let (Ok(_s), Ok(e)) =
-        (env::var("RANGE_START"), env::var("RANGE_END"))
-    {
-        e.parse::<u64>()?
+    // Check for --slots-file flag (worker mode: skip discovery, read slots from file)
+    let args: Vec<String> = env::args().collect();
+    let slots: Vec<u64> = if args.len() > 2 && args[1] == "--slots-file" {
+        let path = &args[2];
+        println!("Reading slots from file: {}", path);
+        let content = fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("Failed to read slots file '{}': {}", path, e));
+        let s: Vec<u64> = content
+            .lines()
+            .filter_map(|l| {
+                let t = l.trim();
+                if t.is_empty() { None } else { t.parse::<u64>().ok() }
+            })
+            .collect();
+        println!("Loaded {} slots from file", s.len());
+        s
     } else {
-        println!("Getting current slot...");
-        let body = json!({
-            "jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []
-        });
-        let resp: Value = client
-            .post(format!("{}?api_key={}", &rpc_url, keys[0]))
-            .json(&body)
-            .send()
-            .await?
-            .json()
-            .await?;
-        let current = resp["result"].as_u64().expect("failed to parse slot");
-        println!("Current slot: {}", current);
-        let end = current.saturating_sub(2);
-        end
-    };
+        // Coordinator mode: discover valid blocks via getBlocks
+        let num_blocks: usize = env::var("NUM_BLOCKS")
+            .unwrap_or_else(|_| "1000".to_string())
+            .parse()
+            .unwrap_or(1000);
 
-    let max_search = 500_000u64;
-    let mut search_range = (num_blocks as u64 * 3).max(1000);
-    let mut all_blocks: Vec<u64> = Vec::new();
+        let search_end = if let (Ok(_s), Ok(e)) =
+            (env::var("RANGE_START"), env::var("RANGE_END"))
+        {
+            e.parse::<u64>()?
+        } else {
+            println!("Getting current slot...");
+            let body = json!({
+                "jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []
+            });
+            let resp: Value = client
+                .post(format!("{}?api_key={}", &rpc_url, keys[0]))
+                .json(&body)
+                .send()
+                .await?
+                .json()
+                .await?;
+            let current = resp["result"].as_u64().expect("failed to parse slot");
+            println!("Current slot: {}", current);
+            current.saturating_sub(2)
+        };
 
-    while all_blocks.len() < num_blocks && search_range <= max_search {
-        let range_start = search_end.saturating_sub(search_range - 1);
-        println!(
-            "Querying getBlocks({}, {}) ...",
-            range_start, search_end
-        );
-        let body = json!({
-            "jsonrpc": "2.0", "id": 1, "method": "getBlocks",
-            "params": [range_start, search_end]
-        });
-        let resp: Value = client
-            .post(format!("{}?api_key={}", &rpc_url, keys[0]))
-            .json(&body)
-            .send()
-            .await?
-            .json()
-            .await?;
-        all_blocks = resp["result"]
-            .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
-            .unwrap_or_default();
-        println!("  Found {} valid blocks", all_blocks.len());
-        if all_blocks.len() < num_blocks {
-            let next = (search_range * 2).min(max_search);
-            println!("  Need {}, expanding search window to {}", num_blocks, next);
-            search_range = next;
+        let max_search = 500_000u64;
+        let mut search_range = (num_blocks as u64 * 3).max(1000);
+        let mut all_blocks: Vec<u64> = Vec::new();
+
+        while all_blocks.len() < num_blocks && search_range <= max_search {
+            let range_start = search_end.saturating_sub(search_range - 1);
+            println!(
+                "Querying getBlocks({}, {}) ...",
+                range_start, search_end
+            );
+            let body = json!({
+                "jsonrpc": "2.0", "id": 1, "method": "getBlocks",
+                "params": [range_start, search_end]
+            });
+            let resp: Value = client
+                .post(format!("{}?api_key={}", &rpc_url, keys[0]))
+                .json(&body)
+                .send()
+                .await?
+                .json()
+                .await?;
+            all_blocks = resp["result"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+                .unwrap_or_default();
+            println!("  Found {} valid blocks", all_blocks.len());
+            if all_blocks.len() < num_blocks {
+                let next = (search_range * 2).min(max_search);
+                println!("  Need {}, expanding search window to {}", num_blocks, next);
+                search_range = next;
+            }
         }
-    }
 
-    if all_blocks.len() < num_blocks {
-        eprintln!(
-            "WARNING: only {} valid blocks in 500K range, taking all of them",
-            all_blocks.len()
-        );
-    }
+        if all_blocks.len() < num_blocks {
+            eprintln!(
+                "WARNING: only {} valid blocks in 500K range, taking all of them",
+                all_blocks.len()
+            );
+        }
 
-    // Take the most recent num_blocks
-    let slots: Vec<u64> = all_blocks
-        .into_iter()
-        .rev()
-        .take(num_blocks)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
+        let s: Vec<u64> = all_blocks
+            .into_iter()
+            .rev()
+            .take(num_blocks)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        s
+    };
 
     let actual = slots.len();
     let first_slot = slots.first().copied().unwrap_or(0);
@@ -113,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("--- Dynamic range resolved via getBlocks ---");
-    println!("  Requested: {} blocks", num_blocks);
+    println!("  Requested: {} blocks", actual);
     println!("  Actual range: slot {} to {} ({} blocks)", first_slot, last_slot, actual);
 
     // Output the actual range

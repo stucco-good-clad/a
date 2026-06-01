@@ -1,0 +1,186 @@
+name: horizontal-blocks
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  RPC_URL: http://slc.rpc.orbitflare.com
+  BATCH_SIZE: 10
+  NUM_BLOCKS: 20000
+  NUM_SEGMENTS: 20
+
+permissions:
+  contents: write
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Coordinator: discover 20K valid blocks, build
+  # the binary once, split into 20 segment files.
+  # ──────────────────────────────────────────────
+  coordinator:
+    runs-on: ubuntu-latest
+    outputs:
+      first-slot: ${{ steps.discover.outputs.first-slot }}
+      last-slot: ${{ steps.discover.outputs.last-slot }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: batch-blocks
+
+      - name: Build optimized binary (shared by all workers)
+        working-directory: batch-blocks
+        run: cargo build --release
+
+      - name: Discover 20K valid blocks and create segment files
+        id: discover
+        env:
+          KEY_1: ${{ secrets.KEY_1 }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp batch-blocks/target/release/batch-blocks artifacts/
+
+          NUM=${{ env.NUM_BLOCKS }}
+          MAX_SEARCH=500000
+          KEY="$KEY_1"
+          RPC="${{ env.RPC_URL }}"
+
+          echo "=== Getting current slot ==="
+          RESP=$(curl -s -X POST "$RPC?api_key=$KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}')
+          CURRENT=$(echo "$RESP" | jq -r '.result')
+          echo "Current slot: $CURRENT"
+          END=$((CURRENT - 2))
+
+          # Iterative search: double window until we find NUM blocks or hit max
+          SEARCH_RANGE=$((NUM * 3))
+          while true; do
+            START=$((END - SEARCH_RANGE + 1))
+            [ "$START" -lt 0 ] && START=0
+            echo "Querying getBlocks($START, $END) ..."
+            RESP=$(curl -s -X POST "$RPC?api_key=$KEY" \
+              -H "Content-Type: application/json" \
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlocks\",\"params\":[$START,$END]}")
+            COUNT=$(echo "$RESP" | jq '.result | length')
+            echo "  Found $COUNT valid blocks"
+            if [ "$COUNT" -ge "$NUM" ] || [ "$SEARCH_RANGE" -ge "$MAX_SEARCH" ]; then
+              break
+            fi
+            SEARCH_RANGE=$((SEARCH_RANGE * 2))
+            echo "  Need $NUM, expanding search window to $SEARCH_RANGE"
+          done
+
+          # Take the most recent NUM blocks
+          SLOTS=$(echo "$RESP" | jq -r ".result | .[-${NUM}:][]")
+          FIRST=$(echo "$SLOTS" | head -1)
+          LAST=$(echo "$SLOTS" | tail -1)
+          TOTAL=$(echo "$SLOTS" | wc -l)
+          echo "Range: $FIRST to $LAST ($TOTAL blocks)"
+          echo "first-slot=$FIRST" >> "$GITHUB_OUTPUT"
+          echo "last-slot=$LAST" >> "$GITHUB_OUTPUT"
+
+          echo "${FIRST}-${LAST}" > artifacts/range.txt
+
+          # Split into $NUM_SEGMENTS segment files (one per worker)
+          echo "$SLOTS" | split -n l/${{ env.NUM_SEGMENTS }} \
+            - artifacts/segment_ --numeric-suffixes=0 --additional-suffix=.txt
+
+          echo "=== Artifacts ready ==="
+          ls -la artifacts/
+
+      - name: Upload artifacts for workers
+        uses: actions/upload-artifact@v4
+        with:
+          name: coordinator-output
+          path: artifacts/*
+
+  # ──────────────────────────────────────────────
+  # Workers: each downloads the pre-built binary +
+  # its segment file, creates an individual release,
+  # fetches 1K blocks, and uploads them.
+  # ──────────────────────────────────────────────
+  workers:
+    needs: [coordinator]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        segment: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+      max-parallel: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: coordinator-output
+
+      - name: Make binary executable
+        run: chmod +x batch-blocks
+
+      - name: Create release from segment range
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SEGMENT_FILE="segment_$(printf '%02d' ${{ matrix.segment }}).txt"
+          FIRST=$(head -1 "$SEGMENT_FILE")
+          LAST=$(tail -1 "$SEGMENT_FILE")
+          TAG="blocks-${FIRST}-${LAST}"
+          echo "Creating release: $TAG"
+          gh release create "$TAG" \
+            --title "Blocks ${FIRST}-${LAST} (worker ${{ matrix.segment }})" \
+            --notes ""
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch blocks
+        run: ./batch-blocks --slots-file "segment_$(printf '%02d' ${{ matrix.segment }}).txt"
+        env:
+          KEY_1: ${{ secrets.KEY_1 }}
+          KEY_2: ${{ secrets.KEY_2 }}
+          KEY_3: ${{ secrets.KEY_3 }}
+          KEY_4: ${{ secrets.KEY_4 }}
+          KEY_5: ${{ secrets.KEY_5 }}
+          KEY_6: ${{ secrets.KEY_6 }}
+          KEY_7: ${{ secrets.KEY_7 }}
+          KEY_8: ${{ secrets.KEY_8 }}
+          KEY_9: ${{ secrets.KEY_9 }}
+          KEY_10: ${{ secrets.KEY_10 }}
+          RPC_URL: ${{ env.RPC_URL }}
+          BATCH_SIZE: ${{ env.BATCH_SIZE }}
+
+      - name: Upload block files to release (batches of 50)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.release.outputs.tag }}"
+          TOTAL=$(ls -1 [0-9]*.txt 2>/dev/null | wc -l)
+          echo "Uploading ${TOTAL} block files to release: ${TAG}"
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "ERROR: no block files found!"
+            exit 1
+          fi
+          BATCH=0
+          UPLOADED=0
+          files=()
+          while IFS= read -r -d '' f; do
+            files+=("$f")
+            if [[ ${#files[@]} -eq 50 ]]; then
+              BATCH=$((BATCH + 1))
+              echo "  Batch ${BATCH}: uploading ${#files[@]} files..."
+              gh release upload "${TAG}" "${files[@]}" --clobber
+              UPLOADED=$((UPLOADED + ${#files[@]}))
+              echo "  Batch ${BATCH}: done (${UPLOADED}/${TOTAL})"
+              files=()
+            fi
+          done < <(find . -maxdepth 1 -name '[0-9]*.txt' -print0)
+          if [[ ${#files[@]} -gt 0 ]]; then
+            BATCH=$((BATCH + 1))
+            echo "  Batch ${BATCH}: uploading ${#files[@]} files..."
+            gh release upload "${TAG}" "${files[@]}" --clobber
+            UPLOADED=$((UPLOADED + ${#files[@]}))
+            echo "  Batch ${BATCH}: done (${UPLOADED}/${TOTAL})"
+          fi
+          echo "Upload complete: ${UPLOADED} files uploaded to ${TAG}"
