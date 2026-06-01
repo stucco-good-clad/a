@@ -20,9 +20,9 @@ jobs:
             "https://github.com/devakapatel/files/releases/download/1/blocks.txt"
           ls -lh blocks.txt
 
-      - name: Install hf-mount (NFS backend)
+      - name: Install hf-mount (daemon)
         run: |
-          curl -sL "https://github.com/huggingface/hf-mount/releases/latest/download/hf-mount-nfs-x86_64-linux" \
+          curl -sL "https://github.com/huggingface/hf-mount/releases/latest/download/hf-mount-x86_64-linux" \
             -o hf-mount
           chmod +x hf-mount
           sudo mv hf-mount /usr/local/bin/
