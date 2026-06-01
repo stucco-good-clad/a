@@ -95,33 +95,23 @@ jobs:
           echo "=== Artifacts ready ==="
           ls -la artifacts/
 
-      - name: Create all releases sequentially (with rate-limit backoff)
+      - name: Create all releases sequentially (with 1s cooldown)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           REPO="${{ github.repository }}"
-          echo "=== Creating 20 releases sequentially (with rate-limit backoff) ==="
           for f in artifacts/segment_*.txt; do
             FIRST=$(head -1 "$f")
             LAST=$(tail -1 "$f")
             TAG="blocks-${FIRST}-${LAST}"
             echo "  Creating release: $TAG"
-            DELAY=5
-            for attempt in 1 2 3 4 5; do
-              if gh release create "$TAG" \
-                --repo "$REPO" \
-                --title "Blocks ${FIRST}-${LAST}" \
-                --notes "" 2>/dev/null; then
-                echo "  Done: $TAG"
-                break
-              fi
-              echo "  Retry ${attempt}: waiting ${DELAY}s before retry..."
-              sleep "$DELAY"
-              DELAY=$((DELAY * 2))
-            done
-            # Pause between releases to avoid rate limit bursts
-            sleep 5
+            gh release create "$TAG" \
+              --repo "$REPO" \
+              --title "Blocks ${FIRST}-${LAST}" \
+              --notes ""
+            echo "  Done: $TAG"
+            sleep 1
           done
           echo "=== All 20 releases created ==="
 
