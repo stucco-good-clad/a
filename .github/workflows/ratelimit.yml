@@ -1,5 +1,7 @@
 name: ratelimit
 
+# Auto-triggered on push to main
+
 on:
   push:
     branches: [main]
