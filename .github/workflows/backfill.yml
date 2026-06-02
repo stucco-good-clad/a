@@ -1,8 +1,6 @@
 name: backfill
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -25,20 +23,27 @@ jobs:
       - name: Determine window
         id: window
         env:
+          KEY_1: ${{ secrets.KEY_1 }}
           RPC_URL: http://slc.rpc.orbitflare.com
         run: |
           set -euo pipefail
-          RESP=$(curl -s -X POST "$RPC_URL?api_key=${{ secrets.KEY_1 }}" \
-            -H "Content-Type: application/json" \
-            -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}')
-          CURRENT=$(echo "$RESP" | jq -r '.result')
-          if [ -z "$CURRENT" ] || [ "$CURRENT" = "null" ]; then
-            echo "Failed to get current slot response: $RESP"
-            exit 1
+          mkdir -p backfill
+
+          if [ -f state.json ]; then
+            LAST=$(jq -r '.last_end_slot' state.json)
+            END=$LAST
+            START=$((LAST - 1000))
+            echo "Resuming from state: window $START to $END"
+          else
+            RESP=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
+              -H "Content-Type: application/json" \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}')
+            CURRENT=$(echo "$RESP" | jq -r '.result')
+            END=$CURRENT
+            START=$((CURRENT - 1000))
+            echo "Fresh start at slot $CURRENT: window $START to $END"
           fi
-          START=$((CURRENT - 1000))
-          END=$CURRENT
-          echo "Using window $START to $END"
+
           echo "start=$START" >> "$GITHUB_OUTPUT"
           echo "end=$END" >> "$GITHUB_OUTPUT"
 
