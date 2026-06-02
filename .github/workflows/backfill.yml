@@ -22,6 +22,8 @@ jobs:
           RPC_URL: http://slc.rpc.orbitflare.com
         run: |
           set -euo pipefail
+          mkdir -p backfill
+
           RESP=$(curl -s -X POST "$RPC_URL?api_key=${{ secrets.KEY_1 }}" \
             -H "Content-Type: application/json" \
             -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}')
