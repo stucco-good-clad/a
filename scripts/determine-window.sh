@@ -23,10 +23,10 @@ if [ -f state.json ]; then
   CURRENT=$(get_current_slot)
   if [ "$START" -ge "$CURRENT" ]; then
     echo "Already caught up (next_start=$START >= current=$CURRENT). Using last 1000 slots."
-    START=$((CURRENT - 9999))
+    START=$((CURRENT - 999))
     END=$CURRENT
   else
-    END=$((START + 9999))
+    END=$((START + 999))
     if [ "$END" -gt "$CURRENT" ]; then
       END=$CURRENT
     fi
@@ -35,7 +35,7 @@ if [ -f state.json ]; then
 else
   CURRENT=$(get_current_slot)
   END=$CURRENT
-  START=$((CURRENT - 9999))
+  START=$((CURRENT - 999))
   echo "Fresh start at slot $CURRENT: window $START to $END"
 fi
 
