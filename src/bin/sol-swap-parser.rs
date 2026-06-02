@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::Parser as ClapParser;
+use memmap2::Mmap;
 use rayon::prelude::*;
 use serde_json::Value;
 use solana_tx_parser::types::LoadedAddressesInput;
@@ -426,8 +427,10 @@ fn main() {
                 .and_then(|s| s.to_str())
                 .and_then(|s| s.parse::<u64>().ok())?;
 
-            let data = fs::read_to_string(path).ok()?;
-            let block: Value = serde_json::from_str(&data).ok()?;
+            let file = fs::File::open(path).ok()?;
+            let mmap = unsafe { Mmap::map(&file).ok()? };
+            let mut bytes = mmap.to_vec();
+            let block: Value = simd_json::from_slice(&mut bytes).ok()?;
 
             let block_time = block.get("blockTime").and_then(|x| x.as_i64());
 
