@@ -108,21 +108,11 @@ jobs:
           cargo build --release
           ./target/release/batch-blocks --slots-file slots.txt
 
-      - name: Filter inner instructions
-        working-directory: batch-blocks
-        run: |
-          set -euo pipefail
-          mkdir -p filtered
-          for f in raw/*.txt; do
-            [ -f "$f" ] || continue
-            python3 filter_inner.py "$f" "filtered/$(basename "$f")"
-          done
-
       - name: Build OHLCV
         working-directory: batch-blocks
         run: |
           set -euo pipefail
-          python3 build-ohlcv.py
+          cargo run --bin ohlcv -- raw ohlcv.csv
 
       - name: Upload OHLCV
         uses: actions/upload-artifact@v4
