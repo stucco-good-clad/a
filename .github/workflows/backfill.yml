@@ -108,13 +108,13 @@ jobs:
       - name: Build OHLCV
         run: |
           set -euo pipefail
-          cargo run --bin ohlcv -- raw ohlcv.csv
+          cargo run --bin ohlcv -- raw swaps.csv
 
-      - name: Upload OHLCV
+      - name: Upload swaps
         uses: actions/upload-artifact@v7
         with:
-          name: ohlcv-${{ steps.window.outputs.start }}-${{ steps.window.outputs.end }}
-          path: ohlcv.csv
+          name: swaps-${{ steps.window.outputs.start }}-${{ steps.window.outputs.end }}
+          path: swaps.csv
           retention-days: 30
 
       - name: Update state
