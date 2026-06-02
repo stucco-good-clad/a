@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          token: ${{ secrets.PAT }}
+          token: ${{ github.token }}
 
       - name: Determine window
         id: window
