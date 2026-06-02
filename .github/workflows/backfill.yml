@@ -99,7 +99,12 @@ jobs:
           echo "Valid blocks: $COUNT"
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
-      - name: Get full block data
+      - name: Build binaries
+        run: |
+          set -euo pipefail
+          cargo build --release --bin batch-blocks --bin sol-swap-parser
+
+      - name: Fetch raw blocks
         env:
           KEY_1: ${{ secrets.KEY_1 }}
           KEY_2: ${{ secrets.KEY_2 }}
@@ -116,19 +121,18 @@ jobs:
           set -euo pipefail
           rm -rf raw
           mkdir -p raw
-          cargo build --release
           ./target/release/batch-blocks --slots-file slots.txt
 
-      - name: Build OHLCV
+      - name: Extract SOL/USD OHLCV
         run: |
           set -euo pipefail
-          cargo run --release --bin ohlcv -- raw swaps.csv
+          ./target/release/sol-swap-parser --raw-dir raw --output sol_usd_ohlcv.csv --intervals block,60,300,900,3600
 
-      - name: Upload swaps
+      - name: Upload OHLCV
         uses: actions/upload-artifact@v7
         with:
-          name: swaps-${{ steps.window.outputs.start }}-${{ steps.window.outputs.end }}
-          path: swaps.csv
+          name: sol-usd-ohlcv-${{ steps.window.outputs.start }}-${{ steps.window.outputs.end }}
+          path: sol_usd_ohlcv.csv
           retention-days: 30
 
       - name: Update state

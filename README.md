@@ -1,17 +1,19 @@
 # batch-blocks
 
-Solana block data pipeline that fetches raw block data via JSON-RPC and converts it into OHLCV (Open/High/Low/Close/Volume) candlestick data for token swaps.
+Solana block data pipeline that fetches raw block data via JSON-RPC, parses DEX swaps using [solana-tx-parser](https://crates.io/crates/solana-tx-parser), and exports SOL/USD OHLCV candlestick data for ML training.
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────┐
-│ batch-blocks│────>│  raw/*.txt   │────>│  ohlcv  │
-│ (fetcher)   │     │ (block JSON) │     │ (parser)│
-└─────────────┘     └──────────────┘     └─────────┘
-       │                                        │
-       v                                        v
-   RPC nodes                              ohlcv.csv
+┌─────────────────┐     ┌──────────────┐     ┌──────────────────┐     ┌───────────┐
+│  batch-blocks   │────>│  raw/*.txt   │────>│ sol-swap-parser  │────>│ SOL_USD   │
+│  (fetcher)      │     │ (block JSON) │     │  (DEX parser)    │     │ _ohlcv.csv│
+└─────────────────┘     └──────────────┘     └──────────────────┘     └───────────┘
+        │                                              │
+        ├── Multi-RPC (10 API keys)                    ├── Jupiter, Raydium, Orca, Meteora, Pumpfun
+        ├── Concurrency limit (20)                     ├── SOL/USDC & SOL/USDT swap filtering
+        ├── Retry with backoff                         ├── Per-block + 1m/5m/15m/1h candles
+        └── Batch processing (10k blocks)              └── CSV export
 ```
 
 ## Binaries
@@ -36,26 +38,59 @@ Fetches Solana block data in parallel batches across multiple API keys.
 
 **Output:** `raw/{slot}.txt` files containing block JSON
 
+### `sol-swap-parser`
+
+Parses raw block files using `solana-tx-parser` and exports SOL/USD OHLCV candles.
+
+**Usage:**
+```bash
+sol-swap-parser [OPTIONS]
+
+OPTIONS:
+    --raw-dir <DIR>       Directory with raw block JSON files [default: raw]
+    --output <FILE>       Output CSV file [default: sol_usd_ohlcv.csv]
+    --intervals <LIST>    Comma-separated intervals in seconds [default: block,60,300,900,3600]
+    --min-volume <USD>    Minimum USD volume per trade [default: 1.0]
+```
+
+**Supported DEXes:** Jupiter, Raydium, Orca, Meteora, Pumpfun, Pumpswap
+
+**Output CSV Columns:**
+| Column | Type | Description |
+|--------|------|-------------|
+| `slot` | u64 | Solana block number (0 for time-aggregated candles) |
+| `block_time` | i64 | Unix timestamp or interval start time |
+| `interval` | string | `block`, `60s`, `300s`, `900s`, `3600s` |
+| `open` | f64 | First SOL/USD price in interval |
+| `high` | f64 | Highest SOL/USD price |
+| `low` | f64 | Lowest SOL/USD price |
+| `close` | f64 | Last SOL/USD price |
+| `vwap` | f64 | Volume-weighted average price |
+| `volume_usd` | f64 | Total USD volume |
+| `buy_volume_usd` | f64 | USD volume from buy trades |
+| `sell_volume_usd` | f64 | USD volume from sell trades |
+| `trades` | u64 | Number of swaps in interval |
+| `buy_count` | u64 | Number of buy trades |
+| `sell_count` | u64 | Number of sell trades |
+
 ### `ohlcv`
 
-Parses raw block files and extracts USDC/USDT swap prices into OHLCV candles.
+Legacy parser using balance-delta approach (kept for backward compatibility).
 
 **Usage:**
 ```bash
 ohlcv [raw_dir] [output_csv]
-# Defaults: raw_dir=raw, output_csv=ohlcv.csv
 ```
-
-**Output:** CSV with columns: `slot, blockTime, open, high, low, close, volume`
 
 ## CI/CD
 
 The `backfill.yml` GitHub Actions workflow runs the full pipeline:
 1. Selects fastest RPC endpoint across 9 regions
-2. Fetches 1000-block windows
-3. Processes blocks into OHLCV data
-4. Uploads CSV as artifact
-5. Commits state for next run
+2. Builds all binaries (cached via `rust-cache`)
+3. Fetches raw blocks using 10 API keys
+4. Parses DEX swaps and exports SOL/USD OHLCV
+5. Uploads CSV as artifact
+6. Commits state for next run
 
 Trigger manually via Actions tab.
 
@@ -74,14 +109,17 @@ Trigger manually via Actions tab.
 ## Development
 
 ```bash
-# Build
+# Build all binaries
 cargo build --release
 
 # Run fetcher
 RPC_URL=http://localhost:8899 KEY_1=test ./target/release/batch-blocks
 
-# Run OHLCV parser
-./target/release/ohlcv raw output.csv
+# Parse SOL/USD OHLCV from raw blocks
+./target/release/sol-swap-parser --raw-dir raw --output sol_usd_ohlcv.csv
+
+# Run tests
+cargo test
 ```
 
 ## License

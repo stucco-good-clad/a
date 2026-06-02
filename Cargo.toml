@@ -1,6 +1,6 @@
 [package]
 name = "batch-blocks"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [[bin]]
@@ -11,10 +11,17 @@ path = "src/main.rs"
 name = "ohlcv"
 path = "src/bin/ohlcv.rs"
 
+[[bin]]
+name = "sol-swap-parser"
+path = "src/bin/sol-swap-parser.rs"
+
 [dependencies]
+bs58 = "0.5"
+clap = { version = "4", features = ["derive"] }
 csv = "1"
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1"
+solana-tx-parser = "0.1"
 tokio = { version = "1", features = ["full"] }
 
 [profile.release]
