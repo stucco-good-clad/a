@@ -49,13 +49,24 @@ jobs:
         run: |
           set -euo pipefail
 
+          get_current_slot() {
+            local resp
+            resp=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
+              -H "Content-Type: application/json" \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}')
+            local slot
+            slot=$(echo "$resp" | jq -r '.result // empty')
+            if [ -z "$slot" ] || [ "$slot" = "null" ]; then
+              echo "ERROR: Failed to get current slot. Response: $resp" >&2
+              return 1
+            fi
+            echo "$slot"
+          }
+
           if [ -f state.json ]; then
             NEXT_START=$(jq -r '.next_start_slot' state.json)
             START=$NEXT_START
-            RESP=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
-              -H "Content-Type: application/json" \
-              -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}')
-            CURRENT=$(echo "$RESP" | jq -r '.result')
+            CURRENT=$(get_current_slot)
             if [ "$START" -ge "$CURRENT" ]; then
               echo "Already caught up (next_start=$START >= current=$CURRENT). Using last 1000 slots."
               START=$((CURRENT - 1000))
@@ -68,10 +79,7 @@ jobs:
             fi
             echo "Resuming from state: window $START to $END"
           else
-            RESP=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
-              -H "Content-Type: application/json" \
-              -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}')
-            CURRENT=$(echo "$RESP" | jq -r '.result')
+            CURRENT=$(get_current_slot)
             END=$CURRENT
             START=$((CURRENT - 1000))
             echo "Fresh start at slot $CURRENT: window $START to $END"
