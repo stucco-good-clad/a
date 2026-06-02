@@ -28,6 +28,9 @@ struct Args {
     #[arg(long, default_value = "sol_usd_ohlcv.csv")]
     output: PathBuf,
 
+    #[arg(long)]
+    enriched_dir: Option<PathBuf>,
+
     #[arg(long, default_value = "1.0")]
     min_volume: f64,
 }
@@ -386,6 +389,17 @@ fn main() {
 
     eprintln!("Processing {} raw block files...", files.len());
 
+    if let Some(ref dir) = args.enriched_dir {
+        fs::create_dir_all(dir).unwrap_or_else(|e| {
+            eprintln!(
+                "Error: cannot create directory '{}': {}",
+                dir.display(),
+                e
+            );
+            process::exit(1);
+        });
+    }
+
     let parser = DexParser::new();
     let mut block_trades: HashMap<u64, Vec<BlockTrade>> = HashMap::new();
     let mut candles: HashMap<u64, Candle> = HashMap::new();
@@ -485,6 +499,30 @@ fn main() {
                 candle.update(t.price, t.volume, t.is_buy);
             }
             if candle.trades > 0 {
+                if let Some(ref enriched_dir) = args.enriched_dir {
+                    let ohlcv = serde_json::json!({
+                        "open": candle.open,
+                        "high": candle.high,
+                        "low": candle.low,
+                        "close": candle.close,
+                        "vwap": candle.vwap(),
+                        "volume_usd": candle.volume_usd,
+                        "buy_volume_usd": candle.buy_volume_usd,
+                        "sell_volume_usd": candle.sell_volume_usd,
+                        "trades": candle.trades,
+                        "buy_count": candle.buy_count,
+                        "sell_count": candle.sell_count,
+                    });
+                    let mut enriched = block.clone();
+                    enriched
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("sol_usd_ohlcv".to_string(), ohlcv);
+                    let enriched_path = enriched_dir.join(format!("{}.txt", slot));
+                    if let Err(e) = fs::write(&enriched_path, serde_json::to_string(&enriched).unwrap()) {
+                        eprintln!("Warning: failed to write '{}': {}", enriched_path.display(), e);
+                    }
+                }
                 candles.insert(slot, candle);
             }
         }

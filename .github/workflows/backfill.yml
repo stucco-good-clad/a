@@ -125,7 +125,7 @@ jobs:
       - name: Extract SOL/USD OHLCV
         run: |
           set -euo pipefail
-          ./target/release/sol-swap-parser --raw-dir raw --output sol_usd_ohlcv.csv
+          ./target/release/sol-swap-parser --raw-dir raw --output sol_usd_ohlcv.csv --enriched-dir enriched
 
       - name: Upload OHLCV
         uses: actions/upload-artifact@v7
@@ -142,15 +142,15 @@ jobs:
           START=${{ steps.window.outputs.start }}
           END=${{ steps.window.outputs.end }}
           TAG="backfill-${START}-${END}"
-          BLOCKS=$(ls raw/*.txt 2>/dev/null | wc -l)
-          echo "Archiving ${BLOCKS} filtered blocks to release..."
-          zip -j raw-${START}-${END}.zip raw/*.txt
+          BLOCKS=$(ls enriched/*.txt 2>/dev/null | wc -l)
+          echo "Archiving ${BLOCKS} enriched blocks to release..."
+          zip -j enriched-${START}-${END}.zip enriched/*.txt
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists, updating assets..."
-            gh release upload "$TAG" raw-${START}-${END}.zip sol_usd_ohlcv.csv --clobber
+            gh release upload "$TAG" enriched-${START}-${END}.zip sol_usd_ohlcv.csv --clobber
           else
             gh release create "$TAG" \
-              raw-${START}-${END}.zip \
+              enriched-${START}-${END}.zip \
               sol_usd_ohlcv.csv \
               --title "Backfill ${START} to ${END}" \
               --generate-notes
