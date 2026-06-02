@@ -28,7 +28,7 @@ jobs:
           BEST_REGION=""
           BEST_TIME=""
           for r in "${REGIONS[@]}"; do
-            URL="http://${r}.rpc.orbitflare.com"
+            URL="http://${r}.rpc.orbitflare.com?api_key=$KEY_1"
             TOTAL=$(curl -o /dev/null -s -w "%{time_total}" -X POST "$URL" \
               -H "Content-Type: application/json" \
               -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}' || echo "999")
