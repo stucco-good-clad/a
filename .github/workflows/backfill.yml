@@ -1,0 +1,107 @@
+name: backfill
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.PAT }}
+
+      - name: Determine window
+        id: window
+        env:
+          KEY_1: ${{ secrets.KEY_1 }}
+          RPC_URL: http://slc.rpc.orbitflare.com
+        run: |
+          set -euo pipefail
+          mkdir -p backfill
+
+          if [ -f backfill/state.json ]; then
+            LAST=$(jq -r '.last_end_slot' backfill/state.json)
+            END=$LAST
+            START=$((LAST - 1000))
+            echo "Resuming from state: window $START to $END"
+          else
+            RESP=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
+              -H "Content-Type: application/json" \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}')
+            CURRENT=$(echo "$RESP" | jq -r '.result')
+            END=$CURRENT
+            START=$((CURRENT - 1000))
+            echo "Fresh start at slot $CURRENT: writing initial state, window $START to $END"
+
+            cat > backfill/state.json <<EOF
+            {
+              "last_end_slot": $CURRENT,
+              "trained_through": $START,
+              "block_count": 0,
+              "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            }
+            EOF
+          fi
+
+          echo "start=$START" >> "$GITHUB_OUTPUT"
+          echo "end=$END" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch valid blocks in window
+        id: fetch
+        env:
+          KEY_1: ${{ secrets.KEY_1 }}
+          RPC_URL: http://slc.rpc.orbitflare.com
+        run: |
+          set -euo pipefail
+          START=${{ steps.window.outputs.start }}
+          END=${{ steps.window.outputs.end }}
+
+          RESP=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
+            -H "Content-Type: application/json" \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlocks\",\"params\":[$START,$END]}")
+          echo "$RESP" | jq -r '.result[]' > backfill/slots.txt
+          COUNT=$(wc -l < backfill/slots.txt)
+          echo "Valid blocks: $COUNT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Get full block data
+        run: |
+          set -euo pipefail
+          cd batch-blocks
+          cargo build --release
+          cp target/release/batch-blocks ../backfill/
+          cd ../backfill
+          ./batch-blocks --slots-file slots.txt
+
+      - name: Update state
+        run: |
+          set -euo pipefail
+          START=${{ steps.window.outputs.start }}
+          END=${{ steps.window.outputs.end }}
+          COUNT=${{ steps.fetch.outputs.count }}
+
+          cat > backfill/state.json <<EOF
+          {
+            "last_end_slot": $START,
+            "trained_through": $END,
+            "block_count": $COUNT,
+            "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          echo "State updated:"
+          cat backfill/state.json
+
+      - name: Commit state
+        run: |
+          git config --global user.name "backfill-bot"
+          git config --global user.email "actions@github.com"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git add backfill/state.json
+          git commit -m "backfill: advance to ${{ steps.window.outputs.start }}"
+          git push
