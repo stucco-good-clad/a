@@ -26,18 +26,28 @@ jobs:
           set -euo pipefail
           REGIONS=(ams fra lon ny slc la va jp sg)
           BEST_REGION=""
-          BEST_TIME=""
+          BEST_TIME="999"
           for r in "${REGIONS[@]}"; do
-            URL="http://${r}.rpc.orbitflare.com?api_key=$KEY_1"
-            TOTAL=$(curl -o /dev/null -s -w "%{time_total}" -X POST "$URL" \
+            RESP=$(curl -s -w "\n%{time_total}" -X POST "http://${r}.rpc.orbitflare.com?api_key=$KEY_1" \
               -H "Content-Type: application/json" \
-              -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}' || echo "999")
-            echo "${r}: ${TOTAL}s"
-            if [ -z "$BEST_REGION" ] || [ "$(printf '%s\n' "$TOTAL" "$BEST_TIME" | sort -V | head -n1)" = "$TOTAL" ]; then
-              BEST_REGION="$r"
-              BEST_TIME="$TOTAL"
+              -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}' 2>/dev/null)
+            BODY=$(echo "$RESP" | head -n -1)
+            TOTAL=$(echo "$RESP" | tail -n 1)
+            SLOT=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',''))" 2>/dev/null || echo "")
+            if [ -n "$SLOT" ] && [ "$TOTAL" != "000" ]; then
+              echo "${r}: ${TOTAL}s (slot ${SLOT})"
+              if [ "$(printf '%s\n' "$TOTAL" "$BEST_TIME" | sort -V | head -n1)" = "$TOTAL" ]; then
+                BEST_REGION="$r"
+                BEST_TIME="$TOTAL"
+              fi
+            else
+              echo "${r}: FAILED (${BODY})"
             fi
           done
+          if [ -z "$BEST_REGION" ]; then
+            echo "ERROR: No RPC endpoint responded successfully"
+            exit 1
+          fi
           echo "Selected: ${BEST_REGION} (${BEST_TIME}s)"
           echo "rpc_url=http://${BEST_REGION}.rpc.orbitflare.com" >> "$GITHUB_OUTPUT"
 
