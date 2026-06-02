@@ -376,11 +376,13 @@ mod tests {
         ];
 
         let deltas = compute_deltas(&pre, &post, &accounts);
-        // When there's no change, the account should either not be in the map
-        // or have an empty delta list
+        // No balance change means either empty list or account not present
         match deltas.get("account0") {
-            Some(account_deltas) => assert_eq!(account_deltas.len(), 0),
-            None => {} // Account not in map is also acceptable for no changes
+            Some(deltas_for_account) => {
+                // All deltas should be zero
+                assert!(deltas_for_account.iter().all(|(_, delta, _)| *delta == 0));
+            }
+            None => {}
         }
     }
 

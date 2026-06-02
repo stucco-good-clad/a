@@ -24,6 +24,9 @@ struct RpcConfig {
 struct FetchStats {
     block_ok: AtomicU64,
     block_err: AtomicU64,
+    block_filtered: AtomicU64,
+    tx_total: AtomicU64,
+    tx_kept: AtomicU64,
     batch_ok: AtomicU64,
     batch_err: AtomicU64,
     per_key_ok: Vec<AtomicU64>,
@@ -35,6 +38,9 @@ impl FetchStats {
         Self {
             block_ok: AtomicU64::new(0),
             block_err: AtomicU64::new(0),
+            block_filtered: AtomicU64::new(0),
+            tx_total: AtomicU64::new(0),
+            tx_kept: AtomicU64::new(0),
             batch_ok: AtomicU64::new(0),
             batch_err: AtomicU64::new(0),
             per_key_ok: (0..n_keys).map(|_| AtomicU64::new(0)).collect(),
@@ -178,6 +184,61 @@ async fn discover_slots(
     Ok(slots)
 }
 
+fn filter_block(block: &Value) -> Option<(Value, u64, u64, u64)> {
+    let txs = block.get("transactions").and_then(|v| v.as_array())?;
+
+    let mut total = 0u64;
+    let mut kept = 0u64;
+    let filtered_txs: Vec<Value> = txs
+        .iter()
+        .filter(|tx| {
+            total += 1;
+            let has_inner = tx
+                .get("meta")
+                .and_then(|m| m.get("innerInstructions"))
+                .and_then(|i| i.as_array())
+                .map(|arr| !arr.is_empty())
+                .unwrap_or(false);
+            if has_inner {
+                kept += 1;
+            }
+            has_inner
+        })
+        .cloned()
+        .collect();
+
+    let dropped = total - kept;
+    let mut block = block.clone();
+    if let Some(obj) = block.as_object_mut() {
+        obj.insert(
+            "transactions".to_string(),
+            Value::Array(filtered_txs),
+        );
+    }
+    Some((block, total, kept, dropped))
+}
+
+fn write_block(slot: u64, block: &Value, stats: &FetchStats) {
+    match serde_json::to_string(block) {
+        Ok(text) => {
+            let path = format!("raw/{}.txt", slot);
+            match fs::write(&path, &text) {
+                Ok(()) => {
+                    stats.block_ok.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to write {}: {}", path, e);
+                    stats.block_err.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Warning: failed to serialize block {}: {}", slot, e);
+            stats.block_err.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 async fn fetch_batch_with_retry(
     client: reqwest::Client,
     url: String,
@@ -207,13 +268,25 @@ async fn fetch_batch_with_retry(
 
                                     if let Some(block) = item.get("result") {
                                         if block.is_object() {
-                                            if let Ok(text) = serde_json::to_string_pretty(block) {
-                                                let path = format!("raw/{}.txt", slot);
-                                                if let Err(e) = fs::write(&path, &text) {
-                                                    eprintln!("Warning: failed to write {}: {}", path, e);
+                                            stats.tx_total.fetch_add(
+                                                block
+                                                    .get("transactions")
+                                                    .and_then(|v| v.as_array())
+                                                    .map(|a| a.len() as u64)
+                                                    .unwrap_or(0),
+                                                Ordering::Relaxed,
+                                            );
+                                            if let Some((filtered, _total, kept, dropped)) =
+                                                filter_block(block)
+                                            {
+                                                stats.tx_kept.fetch_add(kept, Ordering::Relaxed);
+                                                if dropped > 0 {
+                                                    stats
+                                                        .block_filtered
+                                                        .fetch_add(1, Ordering::Relaxed);
                                                 }
+                                                write_block(slot, &filtered, &stats);
                                             }
-                                            stats.block_ok.fetch_add(1, Ordering::Relaxed);
                                         } else if block.is_null() {
                                             stats.block_err.fetch_add(1, Ordering::Relaxed);
                                         }
@@ -373,8 +446,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Results ===");
     println!("  Duration:     {:.2}s", dur_s);
     println!("  Batches ok:   {}/{} ({} err)", b_ok, total_batches, b_err);
-    println!("  Blocks ok:    {}", total_ok);
+    println!("  Blocks saved: {}", total_ok);
     println!("  Blocks err:   {}", total_err);
+    let total_filtered = stats.block_filtered.load(Ordering::Relaxed);
+    let total_tx = stats.tx_total.load(Ordering::Relaxed);
+    let total_kept = stats.tx_kept.load(Ordering::Relaxed);
+    let tx_dropped = total_tx - total_kept;
+    if total_filtered > 0 {
+        println!("  Blocks with filtered txs: {}", total_filtered);
+        println!("  Transactions: {} total, {} kept, {} dropped (null inner)", total_tx, total_kept, tx_dropped);
+    }
     if dur_s > 0.0 {
         println!("  Blocks/s:     {:.0}", total_ok as f64 / dur_s);
     }

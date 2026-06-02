@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process;
 
 use clap::Parser as ClapParser;
@@ -18,22 +18,15 @@ const USDT_MINT: &str = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
 #[derive(ClapParser)]
 #[command(
     name = "sol-swap-parser",
-    about = "Parse Solana DEX swaps and export SOL/USD OHLCV candles"
+    about = "Parse Solana DEX swaps and export per-block SOL/USD OHLCV candles"
 )]
 struct Args {
-    /// Directory with raw block JSON files
     #[arg(long, default_value = "raw")]
     raw_dir: PathBuf,
 
-    /// Output CSV file
     #[arg(long, default_value = "sol_usd_ohlcv.csv")]
     output: PathBuf,
 
-    /// Comma-separated candle intervals: block,60,300,900,3600 (seconds)
-    #[arg(long, default_value = "block,60,300,900,3600")]
-    intervals: String,
-
-    /// Minimum USD volume per trade to include
     #[arg(long, default_value = "1.0")]
     min_volume: f64,
 }
@@ -47,6 +40,7 @@ struct Candle {
     volume_usd: f64,
     buy_volume_usd: f64,
     sell_volume_usd: f64,
+    price_volume_sum: f64,
     trades: u64,
     buy_count: u64,
     sell_count: u64,
@@ -62,6 +56,7 @@ impl Candle {
             volume_usd: 0.0,
             buy_volume_usd: 0.0,
             sell_volume_usd: 0.0,
+            price_volume_sum: 0.0,
             trades: 0,
             buy_count: 0,
             sell_count: 0,
@@ -76,6 +71,7 @@ impl Candle {
         self.low = self.low.min(price);
         self.close = price;
         self.volume_usd += volume;
+        self.price_volume_sum += price * volume;
         if is_buy {
             self.buy_volume_usd += volume;
             self.buy_count += 1;
@@ -84,6 +80,14 @@ impl Candle {
             self.sell_count += 1;
         }
         self.trades += 1;
+    }
+
+    fn vwap(&self) -> f64 {
+        if self.volume_usd > 0.0 {
+            self.price_volume_sum / self.volume_usd
+        } else {
+            self.close
+        }
     }
 }
 
@@ -294,10 +298,13 @@ fn convert_to_solana_input(
         }
     });
 
-    let version = transaction.get("version").and_then(|v| match v.as_str()? {
-        "legacy" => Some(None),
-        v => v.parse::<u8>().ok().map(Some),
-    }).flatten();
+    let version = transaction
+        .get("version")
+        .and_then(|v| match v.as_str()? {
+            "legacy" => Some(None),
+            v => v.parse::<u8>().ok().map(Some),
+        })
+        .flatten();
 
     Some(SolanaTransactionInput {
         slot,
@@ -311,67 +318,8 @@ fn convert_to_solana_input(
     })
 }
 
-fn write_candles(
-    candles: &[(u64, i64, String, Candle)],
-    output: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut wtr = csv::WriterBuilder::new()
-        .has_headers(true)
-        .from_path(output)?;
-
-    wtr.write_record([
-        "slot",
-        "block_time",
-        "interval",
-        "open",
-        "high",
-        "low",
-        "close",
-        "vwap",
-        "volume_usd",
-        "buy_volume_usd",
-        "sell_volume_usd",
-        "trades",
-        "buy_count",
-        "sell_count",
-    ])?;
-
-    for (slot, block_time, interval, candle) in candles {
-        let vwap = if candle.volume_usd > 0.0 {
-            (candle.open + candle.high + candle.low + candle.close) / 4.0
-        } else {
-            candle.close
-        };
-        wtr.write_record([
-            slot.to_string(),
-            block_time.to_string(),
-            interval.clone(),
-            format!("{:.9}", candle.open),
-            format!("{:.9}", candle.high),
-            format!("{:.9}", candle.low),
-            format!("{:.9}", candle.close),
-            format!("{:.9}", vwap),
-            format!("{:.9}", candle.volume_usd),
-            format!("{:.9}", candle.buy_volume_usd),
-            format!("{:.9}", candle.sell_volume_usd),
-            candle.trades.to_string(),
-            candle.buy_count.to_string(),
-            candle.sell_count.to_string(),
-        ])?;
-    }
-
-    wtr.flush()?;
-    Ok(())
-}
-
 fn main() {
     let args = Args::parse();
-
-    let interval_secs: Vec<u64> = args
-        .intervals
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
 
     let mut files: Vec<PathBuf> = fs::read_dir(&args.raw_dir)
         .unwrap_or_else(|e| {
@@ -401,8 +349,7 @@ fn main() {
     eprintln!("Processing {} raw block files...", files.len());
 
     let parser = DexParser::new();
-    let mut block_candles: HashMap<u64, Candle> = HashMap::new();
-    let mut time_candles: HashMap<(i64, u64), Candle> = HashMap::new();
+    let mut candles: HashMap<u64, Candle> = HashMap::new();
     let mut slot_times: HashMap<u64, i64> = HashMap::new();
 
     let mut total_txs = 0u64;
@@ -410,13 +357,12 @@ fn main() {
     let mut sol_usd_trades = 0u64;
     let mut parse_errors = 0usize;
 
-    for path in &files {
-        let slot = path
+    for (file_idx, path) in files.iter().enumerate() {
+        let slot = match path
             .file_stem()
             .and_then(|s| s.to_str())
-            .and_then(|s| s.parse::<u64>().ok());
-
-        let slot = match slot {
+            .and_then(|s| s.parse::<u64>().ok())
+        {
             Some(s) => s,
             None => continue,
         };
@@ -465,7 +411,6 @@ fn main() {
                 if !is_sol_usd_trade(trade) {
                     continue;
                 }
-
                 sol_usd_trades += 1;
 
                 let price = match get_sol_usd_price(trade) {
@@ -480,61 +425,87 @@ fn main() {
                     continue;
                 }
 
-                block_candles
+                candles
                     .entry(slot)
                     .or_insert_with(Candle::new)
                     .update(price, volume, is_buy);
-
-                if let Some(bt) = block_time {
-                    for &interval in &interval_secs {
-                        let interval_start = (bt / interval as i64) * interval as i64;
-                        time_candles
-                            .entry((interval_start, interval))
-                            .or_insert_with(Candle::new)
-                            .update(price, volume, is_buy);
-                    }
-                }
             }
         }
 
-        let processed = block_candles.len() + time_candles.len();
+        let processed = candles.len();
         if processed > 0 && processed.is_multiple_of(500) {
             eprintln!(
-                "  {} files processed, {} SOL/USD trades, {} candles...",
-                files.iter().position(|p| p == path).map(|i| i + 1).unwrap_or(0),
+                "  {}/{} files, {} SOL/USD trades, {} candles...",
+                file_idx + 1,
+                files.len(),
                 sol_usd_trades,
-                block_candles.len() + time_candles.len()
+                processed
             );
         }
     }
 
-    let mut output: Vec<(u64, i64, String, Candle)> = Vec::new();
+    let mut rows: Vec<(u64, i64, Candle)> = candles
+        .into_iter()
+        .map(|(slot, candle)| {
+            let bt = slot_times.get(&slot).copied().unwrap_or(0);
+            (slot, bt, candle)
+        })
+        .collect();
+    rows.sort_by_key(|r| r.0);
 
-    for (&slot, candle) in &block_candles {
-        let bt = slot_times.get(&slot).copied().unwrap_or(0);
-        output.push((slot, bt, "block".to_string(), candle.clone()));
+    let mut wtr = csv::WriterBuilder::new()
+        .has_headers(true)
+        .from_path(&args.output)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: cannot create CSV '{}': {}", args.output.display(), e);
+            process::exit(1);
+        });
+
+    wtr.write_record([
+        "slot",
+        "block_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "vwap",
+        "volume_usd",
+        "buy_volume_usd",
+        "sell_volume_usd",
+        "trades",
+        "buy_count",
+        "sell_count",
+    ])
+    .unwrap();
+
+    for (slot, block_time, candle) in &rows {
+        wtr.write_record([
+            slot.to_string(),
+            block_time.to_string(),
+            format!("{:.9}", candle.open),
+            format!("{:.9}", candle.high),
+            format!("{:.9}", candle.low),
+            format!("{:.9}", candle.close),
+            format!("{:.9}", candle.vwap()),
+            format!("{:.9}", candle.volume_usd),
+            format!("{:.9}", candle.buy_volume_usd),
+            format!("{:.9}", candle.sell_volume_usd),
+            candle.trades.to_string(),
+            candle.buy_count.to_string(),
+            candle.sell_count.to_string(),
+        ])
+        .unwrap();
     }
 
-    for (&(interval_start, interval), candle) in &time_candles {
-        output.push((0, interval_start, format!("{}s", interval), candle.clone()));
-    }
-
-    output.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
-
-    write_candles(&output, &args.output).unwrap_or_else(|e| {
-        eprintln!("Error writing CSV: {}", e);
-        process::exit(1);
-    });
+    wtr.flush().unwrap();
 
     eprintln!();
     eprintln!("=== Summary ===");
-    eprintln!("  Files processed: {}", files.len());
+    eprintln!("  Files processed: {}", rows.len());
     eprintln!("  Parse errors: {}", parse_errors);
     eprintln!("  Total transactions: {}", total_txs);
     eprintln!("  Total trades parsed: {}", total_trades);
     eprintln!("  SOL/USD trades: {}", sol_usd_trades);
-    eprintln!("  Per-block candles: {}", block_candles.len());
-    eprintln!("  Time-based candles: {}", time_candles.len());
     eprintln!("  Output: {}", args.output.display());
 }
 
@@ -543,7 +514,12 @@ mod tests {
     use super::*;
     use solana_tx_parser::{TokenInfo, TradeType};
 
-    fn make_trade(input_mint: &str, output_mint: &str, input_amount: f64, output_amount: f64) -> TradeInfo {
+    fn make_trade(
+        input_mint: &str,
+        output_mint: &str,
+        input_amount: f64,
+        output_amount: f64,
+    ) -> TradeInfo {
         TradeInfo {
             user: "user1".to_string(),
             trade_type: TradeType::Swap,
@@ -585,61 +561,69 @@ mod tests {
 
     #[test]
     fn test_is_sol_usd_trade() {
-        let trade = make_trade(SOL_MINT, USDC_MINT, 1.0, 150.0);
-        assert!(is_sol_usd_trade(&trade));
-
-        let trade = make_trade(USDC_MINT, SOL_MINT, 150.0, 1.0);
-        assert!(is_sol_usd_trade(&trade));
-
-        let trade = make_trade(SOL_MINT, "RandomMint111111111111111111111111111111", 1.0, 100.0);
-        assert!(!is_sol_usd_trade(&trade));
+        assert!(is_sol_usd_trade(&make_trade(SOL_MINT, USDC_MINT, 1.0, 150.0)));
+        assert!(is_sol_usd_trade(&make_trade(USDC_MINT, SOL_MINT, 150.0, 1.0)));
+        assert!(!is_sol_usd_trade(&make_trade(
+            SOL_MINT,
+            "RandomMint111111111111111111111111111111",
+            1.0,
+            100.0
+        )));
     }
 
     #[test]
     fn test_get_sol_usd_price() {
-        let trade = make_trade(SOL_MINT, USDC_MINT, 1.0, 150.0);
-        let price = get_sol_usd_price(&trade).unwrap();
+        let price = get_sol_usd_price(&make_trade(SOL_MINT, USDC_MINT, 1.0, 150.0)).unwrap();
         assert!((price - 150.0).abs() < 0.0001);
 
-        let trade = make_trade(USDC_MINT, SOL_MINT, 150.0, 1.0);
-        let price = get_sol_usd_price(&trade).unwrap();
+        let price = get_sol_usd_price(&make_trade(USDC_MINT, SOL_MINT, 150.0, 1.0)).unwrap();
         assert!((price - 150.0).abs() < 0.0001);
     }
 
     #[test]
     fn test_get_usd_amount() {
-        let trade = make_trade(SOL_MINT, USDC_MINT, 1.0, 150.0);
-        assert!((get_usd_amount(&trade) - 150.0).abs() < 0.0001);
-
-        let trade = make_trade(USDC_MINT, SOL_MINT, 150.0, 1.0);
-        assert!((get_usd_amount(&trade) - 150.0).abs() < 0.0001);
+        assert!(
+            (get_usd_amount(&make_trade(SOL_MINT, USDC_MINT, 1.0, 150.0)) - 150.0).abs()
+                < 0.0001
+        );
+        assert!(
+            (get_usd_amount(&make_trade(USDC_MINT, SOL_MINT, 150.0, 1.0)) - 150.0).abs()
+                < 0.0001
+        );
     }
 
     #[test]
     fn test_is_buy_trade() {
-        let trade = make_trade(USDC_MINT, SOL_MINT, 150.0, 1.0);
-        assert!(is_buy_trade(&trade));
-
-        let trade = make_trade(SOL_MINT, USDC_MINT, 1.0, 150.0);
-        assert!(!is_buy_trade(&trade));
+        assert!(is_buy_trade(&make_trade(USDC_MINT, SOL_MINT, 150.0, 1.0)));
+        assert!(!is_buy_trade(&make_trade(SOL_MINT, USDC_MINT, 1.0, 150.0)));
     }
 
     #[test]
     fn test_candle_update() {
-        let mut candle = Candle::new();
-        candle.update(100.0, 50.0, true);
-        candle.update(105.0, 60.0, false);
-        candle.update(95.0, 40.0, true);
+        let mut c = Candle::new();
+        c.update(100.0, 50.0, true);
+        c.update(105.0, 60.0, false);
+        c.update(95.0, 40.0, true);
 
-        assert!((candle.open - 100.0).abs() < 0.0001);
-        assert!((candle.high - 105.0).abs() < 0.0001);
-        assert!((candle.low - 95.0).abs() < 0.0001);
-        assert!((candle.close - 95.0).abs() < 0.0001);
-        assert!((candle.volume_usd - 150.0).abs() < 0.0001);
-        assert!((candle.buy_volume_usd - 90.0).abs() < 0.0001);
-        assert!((candle.sell_volume_usd - 60.0).abs() < 0.0001);
-        assert_eq!(candle.trades, 3);
-        assert_eq!(candle.buy_count, 2);
-        assert_eq!(candle.sell_count, 1);
+        assert!((c.open - 100.0).abs() < 0.0001);
+        assert!((c.high - 105.0).abs() < 0.0001);
+        assert!((c.low - 95.0).abs() < 0.0001);
+        assert!((c.close - 95.0).abs() < 0.0001);
+        assert!((c.volume_usd - 150.0).abs() < 0.0001);
+        assert!((c.buy_volume_usd - 90.0).abs() < 0.0001);
+        assert!((c.sell_volume_usd - 60.0).abs() < 0.0001);
+        assert_eq!(c.trades, 3);
+        assert_eq!(c.buy_count, 2);
+        assert_eq!(c.sell_count, 1);
+    }
+
+    #[test]
+    fn test_vwap() {
+        let mut c = Candle::new();
+        c.update(100.0, 50.0, true);
+        c.update(200.0, 50.0, false);
+
+        // VWAP = (100*50 + 200*50) / 100 = 15000/100 = 150.0
+        assert!((c.vwap() - 150.0).abs() < 0.0001);
     }
 }

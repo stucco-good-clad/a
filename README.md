@@ -1,19 +1,20 @@
 # batch-blocks
 
-Solana block data pipeline that fetches raw block data via JSON-RPC, parses DEX swaps using [solana-tx-parser](https://crates.io/crates/solana-tx-parser), and exports SOL/USD OHLCV candlestick data for ML training.
+Solana block data pipeline that fetches raw block data via JSON-RPC, parses DEX swaps using [solana-tx-parser](https://crates.io/crates/solana-tx-parser), and exports per-block SOL/USD OHLCV candlestick data for ML training.
 
 ## Architecture
 
 ```
 ┌─────────────────┐     ┌──────────────┐     ┌──────────────────┐     ┌───────────┐
 │  batch-blocks   │────>│  raw/*.txt   │────>│ sol-swap-parser  │────>│ SOL_USD   │
-│  (fetcher)      │     │ (block JSON) │     │  (DEX parser)    │     │ _ohlcv.csv│
+│  (fetcher)      │     │ (filtered)   │     │  (DEX parser)    │     │ _ohlcv.csv│
 └─────────────────┘     └──────────────┘     └──────────────────┘     └───────────┘
         │                                              │
         ├── Multi-RPC (10 API keys)                    ├── Jupiter, Raydium, Orca, Meteora, Pumpfun
         ├── Concurrency limit (20)                     ├── SOL/USDC & SOL/USDT swap filtering
-        ├── Retry with backoff                         ├── Per-block + 1m/5m/15m/1h candles
-        └── Batch processing (10k blocks)              └── CSV export
+        ├── Retry with backoff                         ├── Per-block candles (~400ms resolution)
+        ├── Null inner-tx filtering                    ├── Real VWAP (trade-weighted)
+        └── Batch processing                           └── CSV export
 ```
 
 ## Binaries
@@ -21,6 +22,8 @@ Solana block data pipeline that fetches raw block data via JSON-RPC, parses DEX 
 ### `batch-blocks`
 
 Fetches Solana block data in parallel batches across multiple API keys.
+
+**Filtering:** Strips transactions with null/empty inner instructions before saving. Only DEX-active transactions are persisted.
 
 **Modes:**
 - **Coordinator** (default): Discovers valid block slots via `getBlocks` RPC method
@@ -36,11 +39,11 @@ Fetches Solana block data in parallel batches across multiple API keys.
 | `RANGE_START` | (auto) | Start slot for block discovery |
 | `RANGE_END` | (auto) | End slot for block discovery |
 
-**Output:** `raw/{slot}.txt` files containing block JSON
+**Output:** `raw/{slot}.txt` files containing filtered block JSON
 
 ### `sol-swap-parser`
 
-Parses raw block files using `solana-tx-parser` and exports SOL/USD OHLCV candles.
+Parses raw block files using `solana-tx-parser` and exports per-block SOL/USD OHLCV candles.
 
 **Usage:**
 ```bash
@@ -49,7 +52,6 @@ sol-swap-parser [OPTIONS]
 OPTIONS:
     --raw-dir <DIR>       Directory with raw block JSON files [default: raw]
     --output <FILE>       Output CSV file [default: sol_usd_ohlcv.csv]
-    --intervals <LIST>    Comma-separated intervals in seconds [default: block,60,300,900,3600]
     --min-volume <USD>    Minimum USD volume per trade [default: 1.0]
 ```
 
@@ -58,10 +60,9 @@ OPTIONS:
 **Output CSV Columns:**
 | Column | Type | Description |
 |--------|------|-------------|
-| `slot` | u64 | Solana block number (0 for time-aggregated candles) |
-| `block_time` | i64 | Unix timestamp or interval start time |
-| `interval` | string | `block`, `60s`, `300s`, `900s`, `3600s` |
-| `open` | f64 | First SOL/USD price in interval |
+| `slot` | u64 | Solana block number |
+| `block_time` | i64 | Unix timestamp |
+| `open` | f64 | First SOL/USD price in block |
 | `high` | f64 | Highest SOL/USD price |
 | `low` | f64 | Lowest SOL/USD price |
 | `close` | f64 | Last SOL/USD price |
@@ -69,7 +70,7 @@ OPTIONS:
 | `volume_usd` | f64 | Total USD volume |
 | `buy_volume_usd` | f64 | USD volume from buy trades |
 | `sell_volume_usd` | f64 | USD volume from sell trades |
-| `trades` | u64 | Number of swaps in interval |
+| `trades` | u64 | Number of swaps |
 | `buy_count` | u64 | Number of buy trades |
 | `sell_count` | u64 | Number of sell trades |
 
@@ -77,20 +78,16 @@ OPTIONS:
 
 Legacy parser using balance-delta approach (kept for backward compatibility).
 
-**Usage:**
-```bash
-ohlcv [raw_dir] [output_csv]
-```
-
 ## CI/CD
 
 The `backfill.yml` GitHub Actions workflow runs the full pipeline:
 1. Selects fastest RPC endpoint across 9 regions
 2. Builds all binaries (cached via `rust-cache`)
-3. Fetches raw blocks using 10 API keys
-4. Parses DEX swaps and exports SOL/USD OHLCV
+3. Fetches raw blocks using 10 API keys (null inner-tx filtered)
+4. Parses DEX swaps and exports per-block SOL/USD OHLCV
 5. Uploads CSV as artifact
-6. Commits state for next run
+6. Archives filtered raw blocks + CSV to GitHub Release
+7. Commits state for next run
 
 Trigger manually via Actions tab.
 
