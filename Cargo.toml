@@ -15,14 +15,24 @@ path = "src/bin/ohlcv.rs"
 name = "sol-swap-parser"
 path = "src/bin/sol-swap-parser.rs"
 
+[[bin]]
+name = "binance-downloader"
+path = "src/bin/binance-downloader.rs"
+
+[[bin]]
+name = "enrich-with-cex"
+path = "src/bin/enrich-with-cex.rs"
+
 [dependencies]
 bs58 = "0.5"
+chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 csv = "1"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 serde_json = "1"
 solana-tx-parser = "0.1"
 tokio = { version = "1", features = ["full"] }
+zip = "2"
 
 [profile.release]
 opt-level = 3

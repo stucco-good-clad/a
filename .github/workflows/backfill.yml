@@ -101,7 +101,7 @@ jobs:
       - name: Build binaries
         run: |
           set -euo pipefail
-          cargo build --release --bin batch-blocks --bin sol-swap-parser
+          cargo build --release --bin batch-blocks --bin sol-swap-parser --bin binance-downloader --bin enrich-with-cex
 
       - name: Fetch raw blocks
         env:
@@ -127,6 +127,32 @@ jobs:
           set -euo pipefail
           ./target/release/sol-swap-parser --raw-dir raw --output sol_usd_ohlcv.csv --enriched-dir enriched
 
+      - name: Download Binance 1s klines
+        run: |
+          set -euo pipefail
+          START=${{ steps.window.outputs.start }}
+          END=${{ steps.window.outputs.end }}
+          MIN_TIME=$(ls raw/*.txt | xargs -I{} jq -r '.blockTime' {} | sort -n | head -1)
+          MAX_TIME=$(ls raw/*.txt | xargs -I{} jq -r '.blockTime' {} | sort -n | tail -1)
+          MIN_DATE=$(date -u -d @$MIN_TIME '+%Y-%m-%d')
+          MAX_DATE=$(date -u -d @$MAX_TIME '+%Y-%m-%d')
+          echo "Downloading Binance 1s klines: $MIN_DATE to $MAX_DATE"
+          ./target/release/binance-downloader \
+            --symbols SOLUSDT,BTCUSDT,ETHUSDT,SOLETH,SOLUSDC,ETHBTC,BNBUSDT,XRPUSDT,DOGEUSDT \
+            --interval 1s \
+            --start-date $MIN_DATE \
+            --end-date $MAX_DATE \
+            --output-dir cex
+
+      - name: Enrich blocks with CEX data
+        run: |
+          set -euo pipefail
+          ./target/release/enrich-with-cex \
+            --blocks-dir enriched \
+            --cex-dir cex \
+            --symbols SOLUSDT,BTCUSDT,ETHUSDT,SOLETH,SOLUSDC,ETHBTC,BNBUSDT,XRPUSDT,DOGEUSDT \
+            --output-dir cex_enriched
+
       - name: Upload OHLCV
         uses: actions/upload-artifact@v7
         with:
@@ -143,14 +169,17 @@ jobs:
           END=${{ steps.window.outputs.end }}
           TAG="backfill-${START}-${END}"
           BLOCKS=$(ls enriched/*.txt 2>/dev/null | wc -l)
-          echo "Archiving ${BLOCKS} enriched blocks to release..."
+          CEX_BLOCKS=$(ls cex_enriched/*.txt 2>/dev/null | wc -l)
+          echo "Archiving ${BLOCKS} enriched + ${CEX_BLOCKS} cex_enriched blocks..."
           zip -j enriched-${START}-${END}.zip enriched/*.txt
+          zip -j cex_enriched-${START}-${END}.zip cex_enriched/*.txt
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists, updating assets..."
-            gh release upload "$TAG" enriched-${START}-${END}.zip sol_usd_ohlcv.csv --clobber
+            gh release upload "$TAG" enriched-${START}-${END}.zip cex_enriched-${START}-${END}.zip sol_usd_ohlcv.csv --clobber
           else
             gh release create "$TAG" \
               enriched-${START}-${END}.zip \
+              cex_enriched-${START}-${END}.zip \
               sol_usd_ohlcv.csv \
               --title "Backfill ${START} to ${END}" \
               --generate-notes
