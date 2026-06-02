@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::Parser as ClapParser;
+use rayon::prelude::*;
 use serde_json::Value;
 use solana_tx_parser::types::LoadedAddressesInput;
 use solana_tx_parser::{
@@ -401,96 +402,160 @@ fn main() {
     }
 
     let parser = DexParser::new();
-    let mut block_trades: HashMap<u64, Vec<BlockTrade>> = HashMap::new();
-    let mut candles: HashMap<u64, Candle> = HashMap::new();
-    let mut slot_times: HashMap<u64, i64> = HashMap::new();
+    let min_volume = args.min_volume;
+    let enriched_dir = args.enriched_dir.clone();
+    let files_len = files.len();
 
-    let mut total_txs = 0u64;
-    let mut total_trades = 0u64;
-    let mut sol_usd_trades = 0u64;
-    let mut outliers_filtered = 0u64;
-    let mut parse_errors = 0usize;
+    struct BlockResult {
+        slot: u64,
+        block_time: Option<i64>,
+        block_trades: Vec<BlockTrade>,
+        enriched_json: Option<String>,
+        tx_count: u64,
+        trade_count: u64,
+        sol_usd_count: u64,
+    }
 
-    for (file_idx, path) in files.iter().enumerate() {
-        let slot = match path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.parse::<u64>().ok())
-        {
-            Some(s) => s,
-            None => continue,
-        };
+    eprintln!("Processing {} raw block files in parallel...", files_len);
 
-        let data = match fs::read_to_string(path) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Warning: failed to read '{}': {}", path.display(), e);
-                parse_errors += 1;
-                continue;
-            }
-        };
+    let results: Vec<BlockResult> = files
+        .par_iter()
+        .filter_map(|path| {
+            let slot = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<u64>().ok())?;
 
-        let block: Value = match serde_json::from_str(&data) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("Warning: invalid JSON in '{}': {}", path.display(), e);
-                parse_errors += 1;
-                continue;
-            }
-        };
+            let data = fs::read_to_string(path).ok()?;
+            let block: Value = serde_json::from_str(&data).ok()?;
 
-        let block_time = block.get("blockTime").and_then(|x| x.as_i64());
-        if let Some(bt) = block_time {
-            slot_times.insert(slot, bt);
-        }
+            let block_time = block.get("blockTime").and_then(|x| x.as_i64());
 
-        let txs = block
-            .get("transactions")
-            .and_then(|x| x.as_array())
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
+            let txs = block
+                .get("transactions")
+                .and_then(|x| x.as_array())
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
 
-        for tx in txs {
-            total_txs += 1;
+            let mut block_trades = Vec::new();
+            let mut tx_count = 0u64;
+            let mut trade_count = 0u64;
+            let mut sol_usd_count = 0u64;
 
-            let solana_input = match convert_to_solana_input(slot, block_time, tx) {
-                Some(i) => i,
-                None => continue,
-            };
+            for tx in txs {
+                tx_count += 1;
+                let solana_input = convert_to_solana_input(slot, block_time, tx)?;
+                let trades = parser.parse_trades(&solana_input, None);
+                trade_count += trades.len() as u64;
 
-            let trades = parser.parse_trades(&solana_input, None);
-            total_trades += trades.len() as u64;
-
-            for trade in &trades {
-                if !is_sol_usd_trade(trade) {
-                    continue;
-                }
-                sol_usd_trades += 1;
-
-                let price = match get_sol_usd_price(trade) {
-                    Some(p) => p,
-                    None => continue,
-                };
-
-                let volume = get_usd_amount(trade);
-                let is_buy = is_buy_trade(trade);
-
-                if volume < args.min_volume {
-                    continue;
-                }
-
-                block_trades
-                    .entry(slot)
-                    .or_default()
-                    .push(BlockTrade {
+                for trade in &trades {
+                    if !is_sol_usd_trade(trade) {
+                        continue;
+                    }
+                    sol_usd_count += 1;
+                    let price = get_sol_usd_price(trade)?;
+                    let volume = get_usd_amount(trade);
+                    if volume < min_volume {
+                        continue;
+                    }
+                    let is_buy = is_buy_trade(trade);
+                    block_trades.push(BlockTrade {
                         price,
                         volume,
                         is_buy,
                     });
+                }
+            }
+
+            if block_trades.is_empty() && enriched_dir.is_none() {
+                return None;
+            }
+
+            let mut enriched_json = None;
+            if block_trades.is_empty() {
+                return Some(BlockResult {
+                    slot,
+                    block_time,
+                    block_trades,
+                    enriched_json: None,
+                    tx_count,
+                    trade_count,
+                    sol_usd_count,
+                });
+            }
+
+            let filtered = filter_outliers(&block_trades);
+            let mut candle = Candle::new();
+            for t in &filtered {
+                candle.update(t.price, t.volume, t.is_buy);
+            }
+
+            if candle.trades > 0 && enriched_dir.is_some() {
+                let ohlcv = serde_json::json!({
+                    "open": candle.open,
+                    "high": candle.high,
+                    "low": candle.low,
+                    "close": candle.close,
+                    "vwap": candle.vwap(),
+                    "volume_usd": candle.volume_usd,
+                    "buy_volume_usd": candle.buy_volume_usd,
+                    "sell_volume_usd": candle.sell_volume_usd,
+                    "trades": candle.trades,
+                    "buy_count": candle.buy_count,
+                    "sell_count": candle.sell_count,
+                });
+                let mut enriched = block.clone();
+                enriched
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("sol_usd_ohlcv".to_string(), ohlcv);
+                enriched_json =
+                    Some(serde_json::to_string(&enriched).unwrap_or_default());
+            }
+
+            Some(BlockResult {
+                slot,
+                block_time,
+                block_trades,
+                enriched_json,
+                tx_count,
+                trade_count,
+                sol_usd_count,
+            })
+        })
+        .collect();
+
+    // Merge results sequentially
+    let mut block_trades: HashMap<u64, Vec<BlockTrade>> = HashMap::new();
+    let mut candles: HashMap<u64, Candle> = HashMap::new();
+    let mut slot_times: HashMap<u64, i64> = HashMap::new();
+    let mut total_txs = 0u64;
+    let mut total_trades = 0u64;
+    let mut sol_usd_trades = 0u64;
+    let mut outliers_filtered = 0u64;
+
+    for (i, result) in results.iter().enumerate() {
+        total_txs += result.tx_count;
+        total_trades += result.trade_count;
+        sol_usd_trades += result.sol_usd_count;
+
+        if let Some(bt) = result.block_time {
+            slot_times.insert(result.slot, bt);
+        }
+
+        if !result.block_trades.is_empty() {
+            block_trades.insert(result.slot, result.block_trades.clone());
+        }
+
+        if let Some(ref json_str) = result.enriched_json {
+            if let Some(ref dir) = enriched_dir {
+                let enriched_path = dir.join(format!("{}.txt", result.slot));
+                let _ = fs::write(&enriched_path, json_str);
             }
         }
 
-        if let Some(trades) = block_trades.get(&slot) {
+        if result.sol_usd_count > 0 {
+            let trades = block_trades.get(&result.slot).unwrap();
             let filtered = filter_outliers(trades);
             let dropped = trades.len() - filtered.len();
             outliers_filtered += dropped as u64;
@@ -499,42 +564,16 @@ fn main() {
                 candle.update(t.price, t.volume, t.is_buy);
             }
             if candle.trades > 0 {
-                if let Some(ref enriched_dir) = args.enriched_dir {
-                    let ohlcv = serde_json::json!({
-                        "open": candle.open,
-                        "high": candle.high,
-                        "low": candle.low,
-                        "close": candle.close,
-                        "vwap": candle.vwap(),
-                        "volume_usd": candle.volume_usd,
-                        "buy_volume_usd": candle.buy_volume_usd,
-                        "sell_volume_usd": candle.sell_volume_usd,
-                        "trades": candle.trades,
-                        "buy_count": candle.buy_count,
-                        "sell_count": candle.sell_count,
-                    });
-                    let mut enriched = block.clone();
-                    enriched
-                        .as_object_mut()
-                        .unwrap()
-                        .insert("sol_usd_ohlcv".to_string(), ohlcv);
-                    let enriched_path = enriched_dir.join(format!("{}.txt", slot));
-                    if let Err(e) = fs::write(&enriched_path, serde_json::to_string(&enriched).unwrap()) {
-                        eprintln!("Warning: failed to write '{}': {}", enriched_path.display(), e);
-                    }
-                }
-                candles.insert(slot, candle);
+                candles.insert(result.slot, candle);
             }
         }
 
-        let processed = candles.len();
-        if processed > 0 && processed.is_multiple_of(500) {
+        if (i + 1).is_multiple_of(1000) {
             eprintln!(
-                "  {}/{} files, {} SOL/USD trades, {} candles...",
-                file_idx + 1,
-                files.len(),
+                "  {}/{} blocks merged, {} SOL/USD trades...",
+                i + 1,
+                results.len(),
                 sol_usd_trades,
-                processed
             );
         }
     }
@@ -596,8 +635,7 @@ fn main() {
 
     eprintln!();
     eprintln!("=== Summary ===");
-    eprintln!("  Files processed: {}", rows.len());
-    eprintln!("  Parse errors: {}", parse_errors);
+    eprintln!("  Files processed: {}", results.len());
     eprintln!("  Total transactions: {}", total_txs);
     eprintln!("  Total trades parsed: {}", total_trades);
     eprintln!("  SOL/USD trades: {}", sol_usd_trades);

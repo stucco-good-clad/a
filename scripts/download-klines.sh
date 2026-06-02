@@ -4,8 +4,10 @@ set -euo pipefail
 : "${SYMBOLS:?SYMBOLS is required}"
 : "${BINANCE_DOWNLOADER:?BINANCE_DOWNLOADER is required}"
 
-MIN_TIME=$(ls raw/*.txt | xargs -I{} jq -r '.blockTime' {} | sort -n | head -1)
-MAX_TIME=$(ls raw/*.txt | xargs -I{} jq -r '.blockTime' {} | sort -n | tail -1)
+FIRST=$(ls raw/*.txt | sort -n | head -1)
+LAST=$(ls raw/*.txt | sort -n | tail -1)
+MIN_TIME=$(jq -r '.blockTime' "$FIRST")
+MAX_TIME=$(jq -r '.blockTime' "$LAST")
 MIN_DATE=$(date -u -d "@$MIN_TIME" '+%Y-%m-%d')
 MAX_DATE=$(date -u -d "@$MAX_TIME" '+%Y-%m-%d')
 
