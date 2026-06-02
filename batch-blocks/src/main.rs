@@ -208,7 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(block) = item.get("result") {
                                         if block.is_object() {
                                             if let Ok(text) = serde_json::to_string_pretty(block) {
-                                                let _ = fs::write(format!("{}.txt", slot), &text);
+                                                let _ = fs::write(format!("raw/{}.txt", slot), &text);
                                             }
                                             block_ok.fetch_add(1, Ordering::Relaxed);
                                         } else if block.is_null() {
