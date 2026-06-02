@@ -20,11 +20,34 @@ jobs:
         with:
           workspaces: batch-blocks
 
+      - name: Select best RPC endpoint
+        id: select-rpc
+        env:
+          KEY_1: ${{ secrets.KEY_1 }}
+        run: |
+          set -euo pipefail
+          REGIONS=(ams fra lon ny slc la va jp sg)
+          BEST_REGION=""
+          BEST_TIME=""
+          for r in "${REGIONS[@]}"; do
+            URL="http://${r}.rpc.orbitflare.com"
+            TOTAL=$(curl -o /dev/null -s -w "%{time_total}" -X POST "$URL" \
+              -H "Content-Type: application/json" \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}' || echo "999")
+            echo "${r}: ${TOTAL}s"
+            if [ -z "$BEST_REGION" ] || [ "$(printf '%s\n' "$TOTAL" "$BEST_TIME" | sort -V | head -n1)" = "$TOTAL" ]; then
+              BEST_REGION="$r"
+              BEST_TIME="$TOTAL"
+            fi
+          done
+          echo "Selected: ${BEST_REGION} (${BEST_TIME}s)"
+          echo "rpc_url=http://${BEST_REGION}.rpc.orbitflare.com" >> "$GITHUB_OUTPUT"
+
       - name: Determine window
         id: window
         env:
           KEY_1: ${{ secrets.KEY_1 }}
-          RPC_URL: http://slc.rpc.orbitflare.com
+          RPC_URL: ${{ steps.select-rpc.outputs.rpc_url }}
         run: |
           set -euo pipefail
           mkdir -p backfill
@@ -51,7 +74,7 @@ jobs:
         id: fetch
         env:
           KEY_1: ${{ secrets.KEY_1 }}
-          RPC_URL: http://slc.rpc.orbitflare.com
+          RPC_URL: ${{ steps.select-rpc.outputs.rpc_url }}
         run: |
           set -euo pipefail
           START=${{ steps.window.outputs.start }}
@@ -78,7 +101,7 @@ jobs:
           KEY_8: ${{ secrets.KEY_8 }}
           KEY_9: ${{ secrets.KEY_9 }}
           KEY_10: ${{ secrets.KEY_10 }}
-          RPC_URL: http://slc.rpc.orbitflare.com
+          RPC_URL: ${{ steps.select-rpc.outputs.rpc_url }}
         run: |
           set -euo pipefail
           cargo build --release
