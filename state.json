@@ -1,6 +1,6 @@
 {
-  "last_end_slot": 423719665,
-  "trained_through": 423720665,
+  "next_start_slot": 423720666,
+  "last_processed_slot": 423720665,
   "block_count": 1001,
   "updated_at": "2026-06-02T11:44:31Z"
 }

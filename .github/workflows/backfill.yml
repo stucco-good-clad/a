@@ -51,9 +51,22 @@ jobs:
           mkdir -p backfill
 
           if [ -f state.json ]; then
-            LAST=$(jq -r '.last_end_slot' state.json)
-            END=$LAST
-            START=$((LAST - 1000))
+            NEXT_START=$(jq -r '.next_start_slot' state.json)
+            START=$NEXT_START
+            RESP=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
+              -H "Content-Type: application/json" \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}')
+            CURRENT=$(echo "$RESP" | jq -r '.result')
+            if [ "$START" -ge "$CURRENT" ]; then
+              echo "Already caught up (next_start=$START >= current=$CURRENT). Using last 1000 slots."
+              START=$((CURRENT - 1000))
+              END=$CURRENT
+            else
+              END=$((START + 1000))
+              if [ "$END" -gt "$CURRENT" ]; then
+                END=$CURRENT
+              fi
+            fi
             echo "Resuming from state: window $START to $END"
           else
             RESP=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
@@ -101,6 +114,7 @@ jobs:
           RPC_URL: ${{ steps.select-rpc.outputs.rpc_url }}
         run: |
           set -euo pipefail
+          rm -rf raw
           mkdir -p raw
           cargo build --release
           ./target/release/batch-blocks --slots-file slots.txt
@@ -108,7 +122,7 @@ jobs:
       - name: Build OHLCV
         run: |
           set -euo pipefail
-          cargo run --bin ohlcv -- raw swaps.csv
+          cargo run --release --bin ohlcv -- raw swaps.csv
 
       - name: Upload swaps
         uses: actions/upload-artifact@v7
@@ -120,14 +134,13 @@ jobs:
       - name: Update state
         run: |
           set -euo pipefail
-          START=${{ steps.window.outputs.start }}
           END=${{ steps.window.outputs.end }}
           COUNT=${{ steps.fetch.outputs.count }}
 
           cat > state.json <<EOF
           {
-            "last_end_slot": $START,
-            "trained_through": $END,
+            "next_start_slot": $((END + 1)),
+            "last_processed_slot": $END,
             "block_count": $COUNT,
             "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
@@ -137,9 +150,12 @@ jobs:
 
       - name: Commit state
         run: |
-          git config --global user.name "backfill-bot"
-          git config --global user.email "actions@github.com"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --local user.name "backfill-bot"
+          git config --local user.email "actions@github.com"
           git add state.json
-          git commit -m "backfill: advance to ${{ steps.window.outputs.start }}"
-          git push
+          if git diff --cached --quiet; then
+            echo "No changes to state.json, skipping commit"
+          else
+            git commit -m "backfill: advance to ${{ steps.window.outputs.end }}"
+            git push
+          fi
