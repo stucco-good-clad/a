@@ -22,99 +22,23 @@ jobs:
         id: select-rpc
         env:
           KEY_1: ${{ secrets.KEY_1 }}
-        run: |
-          set -euo pipefail
-          REGIONS=(ams fra lon ny slc la va jp sg)
-          BEST_REGION=""
-          BEST_TIME="999"
-          for r in "${REGIONS[@]}"; do
-            RESP=$(curl -s -w "\n%{time_total}" -X POST "http://${r}.rpc.orbitflare.com?api_key=$KEY_1" \
-              -H "Content-Type: application/json" \
-              -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}' 2>/dev/null)
-            BODY=$(echo "$RESP" | head -n -1)
-            TOTAL=$(echo "$RESP" | tail -n 1)
-            SLOT=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',''))" 2>/dev/null || echo "")
-            if [ -n "$SLOT" ] && [ "$TOTAL" != "000" ]; then
-              echo "${r}: ${TOTAL}s (slot ${SLOT})"
-              if [ "$(printf '%s\n' "$TOTAL" "$BEST_TIME" | sort -V | head -n1)" = "$TOTAL" ]; then
-                BEST_REGION="$r"
-                BEST_TIME="$TOTAL"
-              fi
-            else
-              echo "${r}: FAILED (${BODY})"
-            fi
-          done
-          if [ -z "$BEST_REGION" ]; then
-            echo "ERROR: No RPC endpoint responded successfully"
-            exit 1
-          fi
-          echo "Selected: ${BEST_REGION} (${BEST_TIME}s)"
-          echo "rpc_url=http://${BEST_REGION}.rpc.orbitflare.com" >> "$GITHUB_OUTPUT"
+        run: bash scripts/select-rpc.sh
 
       - name: Determine window
         id: window
         env:
           KEY_1: ${{ secrets.KEY_1 }}
           RPC_URL: ${{ steps.select-rpc.outputs.rpc_url }}
-        run: |
-          set -euo pipefail
-
-          get_current_slot() {
-            local resp
-            resp=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
-              -H "Content-Type: application/json" \
-              -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}')
-            local slot
-            slot=$(echo "$resp" | jq -r '.result // empty')
-            if [ -z "$slot" ] || [ "$slot" = "null" ]; then
-              echo "ERROR: Failed to get current slot. Response: $resp" >&2
-              return 1
-            fi
-            echo "$slot"
-          }
-
-          if [ -f state.json ]; then
-            NEXT_START=$(jq -r '.next_start_slot' state.json)
-            START=$NEXT_START
-            CURRENT=$(get_current_slot)
-            if [ "$START" -ge "$CURRENT" ]; then
-              echo "Already caught up (next_start=$START >= current=$CURRENT). Using last 1000 slots."
-              START=$((CURRENT - 1000))
-              END=$CURRENT
-            else
-              END=$((START + 1000))
-              if [ "$END" -gt "$CURRENT" ]; then
-                END=$CURRENT
-              fi
-            fi
-            echo "Resuming from state: window $START to $END"
-          else
-            CURRENT=$(get_current_slot)
-            END=$CURRENT
-            START=$((CURRENT - 1000))
-            echo "Fresh start at slot $CURRENT: window $START to $END"
-          fi
-
-          echo "start=$START" >> "$GITHUB_OUTPUT"
-          echo "end=$END" >> "$GITHUB_OUTPUT"
+        run: bash scripts/determine-window.sh
 
       - name: Fetch valid blocks in window
         id: fetch
         env:
           KEY_1: ${{ secrets.KEY_1 }}
           RPC_URL: ${{ steps.select-rpc.outputs.rpc_url }}
-        run: |
-          set -euo pipefail
-          START=${{ steps.window.outputs.start }}
-          END=${{ steps.window.outputs.end }}
-
-          RESP=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
-            -H "Content-Type: application/json" \
-            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlocks\",\"params\":[$START,$END]}")
-          echo "$RESP" | jq -r '.result[]' > slots.txt
-          COUNT=$(wc -l < slots.txt)
-          echo "Valid blocks: $COUNT"
-          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          START: ${{ steps.window.outputs.start }}
+          END: ${{ steps.window.outputs.end }}
+        run: bash scripts/fetch-slots.sh
 
       - name: Build binaries
         run: |
@@ -146,28 +70,10 @@ jobs:
           ./target/release/sol-swap-parser --raw-dir raw --output sol_usd_ohlcv.csv --enriched-dir enriched
 
       - name: Download Binance 1s klines
-        run: |
-          set -euo pipefail
-          MIN_TIME=$(ls raw/*.txt | xargs -I{} jq -r '.blockTime' {} | sort -n | head -1)
-          MAX_TIME=$(ls raw/*.txt | xargs -I{} jq -r '.blockTime' {} | sort -n | tail -1)
-          MIN_DATE=$(date -u -d @$MIN_TIME '+%Y-%m-%d')
-          MAX_DATE=$(date -u -d @$MAX_TIME '+%Y-%m-%d')
-          # Binance.vision data is delayed by 1 day — cap at yesterday
-          YESTERDAY=$(date -u -d 'yesterday' '+%Y-%m-%d')
-          if [[ "$MAX_DATE" > "$YESTERDAY" || "$MAX_DATE" == "$YESTERDAY" ]]; then
-            MAX_DATE=$YESTERDAY
-          fi
-          if [[ "$MIN_DATE" > "$MAX_DATE" ]]; then
-            echo "All blocks are too recent — no Binance data available yet. Skipping."
-            exit 0
-          fi
-          echo "Downloading Binance 1s klines: $MIN_DATE to $MAX_DATE"
-          ./target/release/binance-downloader \
-            --symbols SOLUSDT,BTCUSDT,ETHUSDT,SOLETH,SOLUSDC,ETHBTC,BNBUSDT,XRPUSDT,DOGEUSDT \
-            --interval 1s \
-            --start-date $MIN_DATE \
-            --end-date $MAX_DATE \
-            --output-dir cex
+        env:
+          SYMBOLS: SOLUSDT,BTCUSDT,ETHUSDT,SOLETH,SOLUSDC,ETHBTC,BNBUSDT,XRPUSDT,DOGEUSDT
+          BINANCE_DOWNLOADER: ./target/release/binance-downloader
+        run: bash scripts/download-klines.sh
 
       - name: Enrich blocks with CEX data
         run: |
@@ -194,53 +100,17 @@ jobs:
       - name: Archive to Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          START=${{ steps.window.outputs.start }}
-          END=${{ steps.window.outputs.end }}
-          TAG="backfill-${START}-${END}"
-          BLOCKS=$(ls enriched/*.txt 2>/dev/null | wc -l)
-          CEX_BLOCKS=$(ls cex_enriched/*.txt 2>/dev/null | wc -l)
-          echo "Archiving ${BLOCKS} enriched + ${CEX_BLOCKS} cex_enriched blocks..."
-          zip -j enriched-${START}-${END}.zip enriched/*.txt
-          zip -j cex_enriched-${START}-${END}.zip cex_enriched/*.txt
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists, updating assets..."
-            gh release upload "$TAG" enriched-${START}-${END}.zip cex_enriched-${START}-${END}.zip sol_usd_ohlcv.csv --clobber
-          else
-            gh release create "$TAG" \
-              enriched-${START}-${END}.zip \
-              cex_enriched-${START}-${END}.zip \
-              sol_usd_ohlcv.csv \
-              --title "Backfill ${START} to ${END}" \
-              --generate-notes
-          fi
+          START: ${{ steps.window.outputs.start }}
+          END: ${{ steps.window.outputs.end }}
+        run: bash scripts/archive-release.sh
 
       - name: Update state
-        run: |
-          set -euo pipefail
-          END=${{ steps.window.outputs.end }}
-          COUNT=${{ steps.fetch.outputs.count }}
-
-          cat > state.json <<EOF
-          {
-            "next_start_slot": $((END + 1)),
-            "last_processed_slot": $END,
-            "block_count": $COUNT,
-            "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          EOF
-          echo "State updated:"
-          cat state.json
+        env:
+          END: ${{ steps.window.outputs.end }}
+          COUNT: ${{ steps.fetch.outputs.count }}
+        run: bash scripts/update-state.sh
 
       - name: Commit state
-        run: |
-          git config --local user.name "backfill-bot"
-          git config --local user.email "actions@github.com"
-          git add state.json
-          if git diff --cached --quiet; then
-            echo "No changes to state.json, skipping commit"
-          else
-            git commit -m "backfill: advance to ${{ steps.window.outputs.end }}"
-            git push
-          fi
+        env:
+          END: ${{ steps.window.outputs.end }}
+        run: bash scripts/commit-state.sh
