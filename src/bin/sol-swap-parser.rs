@@ -14,6 +14,7 @@ use solana_tx_parser::{
 const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
 const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const USDT_MINT: &str = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+const OUTLIER_THRESHOLD: f64 = 0.5;
 
 #[derive(ClapParser)]
 #[command(
@@ -29,6 +30,13 @@ struct Args {
 
     #[arg(long, default_value = "1.0")]
     min_volume: f64,
+}
+
+#[derive(Debug, Clone)]
+struct BlockTrade {
+    price: f64,
+    volume: f64,
+    is_buy: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +133,36 @@ fn get_usd_amount(trade: &TradeInfo) -> f64 {
 
 fn is_buy_trade(trade: &TradeInfo) -> bool {
     trade.output_token.mint == SOL_MINT
+}
+
+fn median(values: &mut [f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = values.len();
+    if n.is_multiple_of(2) {
+        (values[n / 2 - 1] + values[n / 2]) / 2.0
+    } else {
+        values[n / 2]
+    }
+}
+
+fn filter_outliers(trades: &[BlockTrade]) -> Vec<&BlockTrade> {
+    if trades.len() < 3 {
+        return trades.iter().collect();
+    }
+    let mut prices: Vec<f64> = trades.iter().map(|t| t.price).collect();
+    let med = median(&mut prices);
+    if med <= 0.0 {
+        return trades.iter().collect();
+    }
+    let lo = med * (1.0 - OUTLIER_THRESHOLD);
+    let hi = med * (1.0 + OUTLIER_THRESHOLD);
+    trades
+        .iter()
+        .filter(|t| t.price >= lo && t.price <= hi)
+        .collect()
 }
 
 fn convert_to_solana_input(
@@ -349,12 +387,14 @@ fn main() {
     eprintln!("Processing {} raw block files...", files.len());
 
     let parser = DexParser::new();
+    let mut block_trades: HashMap<u64, Vec<BlockTrade>> = HashMap::new();
     let mut candles: HashMap<u64, Candle> = HashMap::new();
     let mut slot_times: HashMap<u64, i64> = HashMap::new();
 
     let mut total_txs = 0u64;
     let mut total_trades = 0u64;
     let mut sol_usd_trades = 0u64;
+    let mut outliers_filtered = 0u64;
     let mut parse_errors = 0usize;
 
     for (file_idx, path) in files.iter().enumerate() {
@@ -425,10 +465,27 @@ fn main() {
                     continue;
                 }
 
-                candles
+                block_trades
                     .entry(slot)
-                    .or_insert_with(Candle::new)
-                    .update(price, volume, is_buy);
+                    .or_default()
+                    .push(BlockTrade {
+                        price,
+                        volume,
+                        is_buy,
+                    });
+            }
+        }
+
+        if let Some(trades) = block_trades.get(&slot) {
+            let filtered = filter_outliers(trades);
+            let dropped = trades.len() - filtered.len();
+            outliers_filtered += dropped as u64;
+            let mut candle = Candle::new();
+            for t in filtered {
+                candle.update(t.price, t.volume, t.is_buy);
+            }
+            if candle.trades > 0 {
+                candles.insert(slot, candle);
             }
         }
 
@@ -506,6 +563,9 @@ fn main() {
     eprintln!("  Total transactions: {}", total_txs);
     eprintln!("  Total trades parsed: {}", total_trades);
     eprintln!("  SOL/USD trades: {}", sol_usd_trades);
+    if outliers_filtered > 0 {
+        eprintln!("  Outliers filtered: {}", outliers_filtered);
+    }
     eprintln!("  Output: {}", args.output.display());
 }
 
@@ -625,5 +685,36 @@ mod tests {
 
         // VWAP = (100*50 + 200*50) / 100 = 15000/100 = 150.0
         assert!((c.vwap() - 150.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_median() {
+        assert!((median(&mut vec![100.0]) - 100.0).abs() < 0.0001);
+        assert!((median(&mut vec![100.0, 200.0]) - 150.0).abs() < 0.0001);
+        assert!((median(&mut vec![100.0, 150.0, 200.0]) - 150.0).abs() < 0.0001);
+        assert!((median(&mut vec![100.0, 100.0, 100.0, 28962.0]) - 100.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_filter_outliers() {
+        let trades = vec![
+            BlockTrade { price: 76.0, volume: 100.0, is_buy: true },
+            BlockTrade { price: 76.5, volume: 200.0, is_buy: false },
+            BlockTrade { price: 76.2, volume: 150.0, is_buy: true },
+            BlockTrade { price: 28962.0, volume: 30.0, is_buy: true },
+        ];
+        let filtered = filter_outliers(&trades);
+        assert_eq!(filtered.len(), 3);
+        assert!(filtered.iter().all(|t| t.price < 200.0));
+    }
+
+    #[test]
+    fn test_filter_outliers_small_batch() {
+        let trades = vec![
+            BlockTrade { price: 76.0, volume: 100.0, is_buy: true },
+            BlockTrade { price: 76.5, volume: 200.0, is_buy: false },
+        ];
+        let filtered = filter_outliers(&trades);
+        assert_eq!(filtered.len(), 2);
     }
 }
