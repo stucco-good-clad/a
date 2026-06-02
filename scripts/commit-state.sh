@@ -5,6 +5,7 @@ set -euo pipefail
 
 git config --local user.name "backfill-bot"
 git config --local user.email "actions@github.com"
+git pull --rebase
 git add state.json
 if git diff --cached --quiet; then
   echo "No changes to state.json, skipping commit"
