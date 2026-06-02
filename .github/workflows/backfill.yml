@@ -17,8 +17,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: batch-blocks
 
       - name: Select best RPC endpoint
         id: select-rpc
@@ -83,8 +81,8 @@ jobs:
           RESP=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
             -H "Content-Type: application/json" \
             -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlocks\",\"params\":[$START,$END]}")
-          echo "$RESP" | jq -r '.result[]' > batch-blocks/slots.txt
-          COUNT=$(wc -l < batch-blocks/slots.txt)
+          echo "$RESP" | jq -r '.result[]' > slots.txt
+          COUNT=$(wc -l < slots.txt)
           echo "Valid blocks: $COUNT"
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
@@ -115,10 +113,10 @@ jobs:
           cargo run --bin ohlcv -- raw ohlcv.csv
 
       - name: Upload OHLCV
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ohlcv-${{ steps.window.outputs.start }}-${{ steps.window.outputs.end }}
-          path: batch-blocks/ohlcv.csv
+          path: ohlcv.csv
           retention-days: 30
 
       - name: Update state

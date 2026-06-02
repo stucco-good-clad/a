@@ -37,7 +37,10 @@ fn main() {
         let block_time = block_time.unwrap();
 
         let mut trades: Vec<Trade> = Vec::new();
-        let txs = v.get("transactions").and_then(|x| x.as_array()).unwrap_or(&[]);
+        let txs = v.get("transactions")
+            .and_then(|x| x.as_array())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
 
         for tx in txs {
             let msg = tx.get("transaction").and_then(|x| x.get("message"));
@@ -58,8 +61,18 @@ fn main() {
                 continue;
             }
 
-            let pre = tx.get("meta").and_then(|m| m.get("preTokenBalances")).and_then(|x| x.as_array()).unwrap_or(&[]);
-            let post = tx.get("meta").and_then(|m| m.get("postTokenBalances")).and_then(|x| x.as_array()).unwrap_or(&[]);
+            let pre = tx
+                .get("meta")
+                .and_then(|m| m.get("preTokenBalances"))
+                .and_then(|x| x.as_array())
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let post = tx
+                .get("meta")
+                .and_then(|m| m.get("postTokenBalances"))
+                .and_then(|x| x.as_array())
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
 
             let mut sol_pre: u64 = 0;
             let mut sol_post: u64 = 0;
