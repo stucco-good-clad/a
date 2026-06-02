@@ -130,12 +130,19 @@ jobs:
       - name: Download Binance 1s klines
         run: |
           set -euo pipefail
-          START=${{ steps.window.outputs.start }}
-          END=${{ steps.window.outputs.end }}
           MIN_TIME=$(ls raw/*.txt | xargs -I{} jq -r '.blockTime' {} | sort -n | head -1)
           MAX_TIME=$(ls raw/*.txt | xargs -I{} jq -r '.blockTime' {} | sort -n | tail -1)
           MIN_DATE=$(date -u -d @$MIN_TIME '+%Y-%m-%d')
           MAX_DATE=$(date -u -d @$MAX_TIME '+%Y-%m-%d')
+          # Binance.vision data is delayed by 1 day — cap at yesterday
+          YESTERDAY=$(date -u -d 'yesterday' '+%Y-%m-%d')
+          if [[ "$MAX_DATE" > "$YESTERDAY" || "$MAX_DATE" == "$YESTERDAY" ]]; then
+            MAX_DATE=$YESTERDAY
+          fi
+          if [[ "$MIN_DATE" > "$MAX_DATE" ]]; then
+            echo "All blocks are too recent — no Binance data available yet. Skipping."
+            exit 0
+          fi
           echo "Downloading Binance 1s klines: $MIN_DATE to $MAX_DATE"
           ./target/release/binance-downloader \
             --symbols SOLUSDT,BTCUSDT,ETHUSDT,SOLETH,SOLUSDC,ETHBTC,BNBUSDT,XRPUSDT,DOGEUSDT \
@@ -147,11 +154,17 @@ jobs:
       - name: Enrich blocks with CEX data
         run: |
           set -euo pipefail
-          ./target/release/enrich-with-cex \
-            --blocks-dir enriched \
-            --cex-dir cex \
-            --symbols SOLUSDT,BTCUSDT,ETHUSDT,SOLETH,SOLUSDC,ETHBTC,BNBUSDT,XRPUSDT,DOGEUSDT \
-            --output-dir cex_enriched
+          if [ -d cex ] && [ "$(ls cex/*.csv 2>/dev/null | wc -l)" -gt 0 ]; then
+            ./target/release/enrich-with-cex \
+              --blocks-dir enriched \
+              --cex-dir cex \
+              --symbols SOLUSDT,BTCUSDT,ETHUSDT,SOLETH,SOLUSDC,ETHBTC,BNBUSDT,XRPUSDT,DOGEUSDT \
+              --output-dir cex_enriched
+          else
+            echo "No CEX data available — copying enriched blocks as-is"
+            mkdir -p cex_enriched
+            cp enriched/*.txt cex_enriched/
+          fi
 
       - name: Upload OHLCV
         uses: actions/upload-artifact@v7

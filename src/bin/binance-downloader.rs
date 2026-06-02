@@ -42,12 +42,16 @@ struct KlineRow {
     taker_buy_quote_volume: String,
 }
 
-fn download_zip(url: &str) -> Result<Vec<u8>, reqwest::Error> {
+fn download_zip(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap();
-    let bytes = client.get(url).send()?.bytes()?.to_vec();
+        .build()?;
+    let response = client.get(url).send()?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {}", status).into());
+    }
+    let bytes = response.bytes()?.to_vec();
     Ok(bytes)
 }
 
