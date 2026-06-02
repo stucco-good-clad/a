@@ -19,36 +19,20 @@ jobs:
       - name: Determine window
         id: window
         env:
-          KEY_1: ${{ secrets.KEY_1 }}
           RPC_URL: http://slc.rpc.orbitflare.com
         run: |
           set -euo pipefail
-          mkdir -p backfill
-
-          if [ -f backfill/state.json ]; then
-            LAST=$(jq -r '.last_end_slot' backfill/state.json)
-            END=$LAST
-            START=$((LAST - 1000))
-            echo "Resuming from state: window $START to $END"
-          else
-            RESP=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
-              -H "Content-Type: application/json" \
-              -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}')
-            CURRENT=$(echo "$RESP" | jq -r '.result')
-            END=$CURRENT
-            START=$((CURRENT - 1000))
-            echo "Fresh start at slot $CURRENT: writing initial state, window $START to $END"
-
-            cat > backfill/state.json <<EOF
-            {
-              "last_end_slot": $CURRENT,
-              "trained_through": $START,
-              "block_count": 0,
-              "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            }
-            EOF
+          RESP=$(curl -s -X POST "$RPC_URL?api_key=${{ secrets.KEY_1 }}" \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}')
+          CURRENT=$(echo "$RESP" | jq -r '.result')
+          if [ -z "$CURRENT" ] || [ "$CURRENT" = "null" ]; then
+            echo "Failed to get current slot response: $RESP"
+            exit 1
           fi
-
+          START=$((CURRENT - 1000))
+          END=$CURRENT
+          echo "Using window $START to $END"
           echo "start=$START" >> "$GITHUB_OUTPUT"
           echo "end=$END" >> "$GITHUB_OUTPUT"
 
