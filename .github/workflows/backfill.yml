@@ -87,7 +87,6 @@ jobs:
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
       - name: Get full block data
-        working-directory: batch-blocks
         env:
           KEY_1: ${{ secrets.KEY_1 }}
           KEY_2: ${{ secrets.KEY_2 }}
@@ -107,7 +106,6 @@ jobs:
           ./target/release/batch-blocks --slots-file slots.txt
 
       - name: Build OHLCV
-        working-directory: batch-blocks
         run: |
           set -euo pipefail
           cargo run --bin ohlcv -- raw ohlcv.csv
