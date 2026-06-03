@@ -1,0 +1,171 @@
+name: benchmark-onfinality
+
+on:
+  workflow_dispatch:
+    inputs:
+      num_blocks:
+        description: 'Blocks per test'
+        required: false
+        default: '200'
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ github.token }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Detect OnFinality keys
+        id: detect-of
+        env:
+          ON1: ${{ secrets.on1 }}
+          ON2: ${{ secrets.on2 }}
+          ON3: ${{ secrets.on3 }}
+          ON4: ${{ secrets.on4 }}
+          ON5: ${{ secrets.on5 }}
+        run: |
+          set +e
+          KEYS=""
+          for N in 1 2 3 4 5; do
+            VAR="ON${N}"
+            VAL="${!VAR}"
+            if [ -n "$VAL" ]; then
+              if [ -n "$KEYS" ]; then KEYS="${KEYS},"; fi
+              KEYS="${KEYS}${VAL}"
+              echo "  on${N}: ${VAL:0:8}..."
+            fi
+          done
+          N=$(echo "$KEYS" | tr ',' '\n' | wc -l)
+          if [ "$N" -eq 0 ] || [ -z "$KEYS" ]; then
+            echo "ERROR: No OnFinality keys found" >&2
+            exit 1
+          fi
+          echo ""
+          echo "  total: ${N} keys"
+          echo "n=${N}" >> "$GITHUB_OUTPUT"
+          echo "keys=${KEYS}" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary
+        run: cargo build --release --bin batch-blocks
+
+      - name: Benchmark getSlot (pure RPS)
+        id: bench-slot
+        env:
+          ONFINALITY_KEYS: ${{ steps.detect-of.outputs.keys }}
+          N: ${{ steps.detect-of.outputs.n }}
+          NUM_BLOCKS: ${{ github.event.inputs.num_blocks || '200' }}
+        run: |
+          set -euo pipefail
+
+          IFS=',' read -ra KEYS <<< "$ONFINALITY_KEYS"
+          for i in "${!KEYS[@]}"; do
+            export "KEY_$((i+1))=${KEYS[$i]}"
+          done
+
+          echo "=== BENCHMARK: getSlot (pure RPS) ==="
+          echo "Keys: $N, Blocks: $NUM_BLOCKS"
+          echo ""
+
+          # Test matrix: RPS_PER_KEY x WORKERS_PER_KEY
+          RESULTS=""
+          for RPS in 10 15 20 25 30 40 50; do
+            for WPK in 1 2; do
+              TOTAL_WORKERS=$((N * WPK))
+              EXPECTED=$((RPS * TOTAL_WORKERS))
+              echo "--- Test: ${N} keys × ${WPK} workers × ${RPS} RPS = ${EXPECTED} expected RPS ---"
+
+              export RPS_PER_KEY="$RPS"
+              export WORKERS_PER_KEY="$WPK"
+              export BENCHMARK_MODE="1"
+
+              START=$(date +%s)
+              OUTPUT=$(./target/release/batch-blocks --num-blocks "$NUM_BLOCKS" 2>&1) || true
+              END=$(date +%s)
+              ELAPSED=$((END - START))
+
+              # Extract actual blocks/s from output
+              ACTUAL_RPS=$(echo "$OUTPUT" | grep "Blocks/s:" | tail -1 | awk '{print $2}')
+              REQ_OK=$(echo "$OUTPUT" | grep "Requests ok:" | awk '{print $3}')
+              REQ_ERR=$(echo "$OUTPUT" | grep "Requests ok:" | sed 's/.*(\(.*\) err)/\1/')
+
+              echo "  Elapsed: ${ELAPSED}s, RPS: ${ACTUAL_RPS}, OK: ${REQ_OK}, ERR: ${REQ_ERR}"
+              RESULTS="${RESULTS}| ${N}k×${WPK}w×${RPS}rps | ${EXPECTED} | ${ACTUAL_RPS:-0} | ${ELAPSED}s | ${REQ_OK:-0} | ${REQ_ERR:-0}\n"
+              echo ""
+            done
+          done
+
+          echo "=== getSlot RESULTS ==="
+          echo -e "| Config | Expected RPS | Actual RPS | Time | OK | ERR |"
+          echo -e "|--------|-------------|-----------|------|-----|-----|"
+          echo -e "$RESULTS"
+
+      - name: Benchmark getBlock full (realistic)
+        id: bench-block
+        env:
+          ONFINALITY_KEYS: ${{ steps.detect-of.outputs.keys }}
+          N: ${{ steps.detect-of.outputs.n }}
+          NUM_BLOCKS: ${{ github.event.inputs.num_blocks || '200' }}
+        run: |
+          set -euo pipefail
+
+          IFS=',' read -ra KEYS <<< "$ONFINALITY_KEYS"
+          for i in "${!KEYS[@]}"; do
+            export "KEY_$((i+1))=${KEYS[$i]}"
+          done
+
+          echo "=== BENCHMARK: getBlock full (realistic) ==="
+          echo "Keys: $N, Blocks: $NUM_BLOCKS"
+          echo ""
+
+          RESULTS=""
+          for RPS in 5 10 15 20 25 30; do
+            for WPK in 1 2; do
+              TOTAL_WORKERS=$((N * WPK))
+              EXPECTED=$((RPS * TOTAL_WORKERS))
+              echo "--- Test: ${N} keys × ${WPK} workers × ${RPS} RPS = ${EXPECTED} expected RPS ---"
+
+              export RPS_PER_KEY="$RPS"
+              export WORKERS_PER_KEY="$WPK"
+              export BENCHMARK_MODE="0"
+
+              START=$(date +%s)
+              OUTPUT=$(./target/release/batch-blocks --num-blocks "$NUM_BLOCKS" 2>&1) || true
+              END=$(date +%s)
+              ELAPSED=$((END - START))
+
+              ACTUAL_RPS=$(echo "$OUTPUT" | grep "Blocks/s:" | tail -1 | awk '{print $2}')
+              REQ_OK=$(echo "$OUTPUT" | grep "Requests ok:" | awk '{print $3}')
+              REQ_ERR=$(echo "$OUTPUT" | grep "Requests ok:" | sed 's/.*(\(.*\) err)/\1/')
+              BLOCKS_OK=$(echo "$OUTPUT" | grep "Blocks saved:" | awk '{print $3}')
+
+              echo "  Elapsed: ${ELAPSED}s, RPS: ${ACTUAL_RPS}, Blocks: ${BLOCKS_OK}, OK: ${REQ_OK}, ERR: ${REQ_ERR}"
+              RESULTS="${RESULTS}| ${N}k×${WPK}w×${RPS}rps | ${EXPECTED} | ${ACTUAL_RPS:-0} | ${ELAPSED}s | ${BLOCKS_OK:-0} | ${REQ_OK:-0} | ${REQ_ERR:-0}\n"
+              echo ""
+            done
+          done
+
+          echo "=== getBlock RESULTS ==="
+          echo -e "| Config | Expected RPS | Actual RPS | Time | Blocks | OK | ERR |"
+          echo -e "|--------|-------------|-----------|------|--------|-----|-----|"
+          echo -e "$RESULTS"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "========================================="
+          echo "  ONFINALITY BENCHMARK COMPLETE"
+          echo "========================================="
+          echo ""
+          echo "Keys used: ${{ steps.detect-of.outputs.n }}"
+          echo "Blocks per test: ${{ github.event.inputs.num_blocks || '200' }}"
+          echo ""
+          echo "Review getSlot and getBlock results above."
+          echo "Choose the config with highest Actual RPS and 0 ERR."

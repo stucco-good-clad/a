@@ -294,6 +294,7 @@ dependencies = [
  "clap",
  "csv",
  "memmap2 0.9.10",
+ "rand 0.8.6",
  "rayon",
  "reqwest",
  "serde_json",

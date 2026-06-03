@@ -7,10 +7,28 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 const DEFAULT_NUM_BLOCKS: usize = 1000;
-const RPS_PER_KEY: u64 = 10;
+const DEFAULT_RPS_PER_KEY: u64 = 10;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_RETRY_ATTEMPTS: u32 = 3;
 const INITIAL_RETRY_DELAY_MS: u64 = 1000;
+
+fn rps_per_key() -> u64 {
+    std::env::var("RPS_PER_KEY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_RPS_PER_KEY)
+}
+
+fn workers_per_key() -> usize {
+    std::env::var("WORKERS_PER_KEY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+}
+
+fn benchmark_mode() -> bool {
+    std::env::var("BENCHMARK_MODE").ok().map(|v| v == "1" || v == "true").unwrap_or(false)
+}
 
 struct RpcConfig {
     url: String,
@@ -61,8 +79,14 @@ fn load_config() -> Result<RpcConfig, Box<dyn std::error::Error>> {
         return Err("At least KEY_1 must be set".into());
     }
 
+    let rps = rps_per_key();
+    let workers = workers_per_key();
+    let bench = benchmark_mode();
     println!("RPC URL: {}", url);
-    println!("Keys: {} (round-robin, {} RPS each)", keys.len(), RPS_PER_KEY);
+    println!("Keys: {} (round-robin, {} RPS each, {} workers/key)", keys.len(), rps, workers);
+    if bench {
+        println!("BENCHMARK MODE: getSlot only (no disk write)");
+    }
 
     Ok(RpcConfig { url, keys })
 }
@@ -323,6 +347,36 @@ async fn fetch_block_with_retry(
     stats.per_key_err[key_idx].fetch_add(1, Ordering::Relaxed);
 }
 
+async fn fetch_slot_benchmark(
+    client: &reqwest::Client,
+    url: &str,
+    _slot: u64,
+    stats: &FetchStats,
+    key_idx: usize,
+) {
+    let body = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []
+    });
+    match client.post(url).json(&body).send().await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                stats.req_ok.fetch_add(1, Ordering::Relaxed);
+                stats.per_key_ok[key_idx].fetch_add(1, Ordering::Relaxed);
+                stats.block_ok.fetch_add(1, Ordering::Relaxed);
+            } else {
+                stats.req_err.fetch_add(1, Ordering::Relaxed);
+                stats.per_key_err[key_idx].fetch_add(1, Ordering::Relaxed);
+                stats.block_err.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        Err(_) => {
+            stats.req_err.fetch_add(1, Ordering::Relaxed);
+            stats.per_key_err[key_idx].fetch_add(1, Ordering::Relaxed);
+            stats.block_err.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 async fn run_key_worker(
     key_idx: usize,
     api_key: String,
@@ -332,7 +386,9 @@ async fn run_key_worker(
     stats: Arc<FetchStats>,
 ) {
     let url = format!("{}?apikey={}", rpc_url, api_key);
-    let interval = Duration::from_millis(1000 / RPS_PER_KEY);
+    let rps = rps_per_key();
+    let interval = Duration::from_millis(1000 / rps);
+    let bench = benchmark_mode();
     let total = slots.len();
     let worker_start = Instant::now();
     let log_every = 25;
@@ -340,7 +396,11 @@ async fn run_key_worker(
     for (i, slot) in slots.into_iter().enumerate() {
         let start = Instant::now();
 
-        fetch_block_with_retry(&client, &url, slot, &stats, key_idx).await;
+        if bench {
+            fetch_slot_benchmark(&client, &url, slot, &stats, key_idx).await;
+        } else {
+            fetch_block_with_retry(&client, &url, slot, &stats, key_idx).await;
+        }
 
         if (i + 1) % log_every == 0 || i == total - 1 {
             let elapsed = worker_start.elapsed().as_secs_f64();
@@ -407,12 +467,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     fs::write("range.txt", format!("{}-{}", first_slot, last_slot))?;
 
-    let total_rps = n_keys as u64 * RPS_PER_KEY;
+    let rps = rps_per_key();
+    let workers = workers_per_key();
+    let bench = benchmark_mode();
+    let total_rps = n_keys as u64 * rps * workers as u64;
     let est_secs = actual as f64 / total_rps as f64;
     println!(
-        "Fetching {} blocks, {} keys × {} RPS = {} RPS total (~{:.0}s)",
-        actual, n_keys, RPS_PER_KEY, total_rps, est_secs
+        "Fetching {} blocks, {} keys × {} workers × {} RPS = {} RPS total (~{:.0}s)",
+        actual, n_keys, workers, rps, total_rps, est_secs
     );
+    if bench {
+        println!("BENCHMARK MODE: getSlot only, no disk writes");
+    }
 
     let total_start = Instant::now();
     let stats = Arc::new(FetchStats::new(n_keys));
@@ -423,19 +489,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         key_slots[i % n_keys].push(slot);
     }
 
-    // Spawn one worker per key, each with its own rate limiter
-    let global_start = Instant::now();
-    eprintln!("[0s] Starting {} workers, {} blocks each, {} RPS per key", n_keys, slots.len() / n_keys, RPS_PER_KEY);
-    let mut handles = Vec::with_capacity(n_keys);
-    for (key_idx, api_key) in config.keys.into_iter().enumerate() {
-        let client = client.clone();
-        let stats = Arc::clone(&stats);
-        let rpc_url = config.url.clone();
-        let my_slots = std::mem::take(&mut key_slots[key_idx]);
+    // Spawn workers per key, each with its own rate limiter
+    let _global_start = Instant::now();
+    eprintln!("[0s] Starting {} keys × {} workers = {} total workers, {} blocks each, {} RPS per worker",
+        n_keys, workers, n_keys * workers, slots.len() / (n_keys * workers), rps);
+    let mut handles = Vec::with_capacity(n_keys * workers);
+    for (key_idx, api_key) in config.keys.iter().enumerate() {
+        let my_slots = &key_slots[key_idx];
+        let chunk_size = (my_slots.len() + workers - 1) / workers;
+        for w in 0..workers {
+            let start = w * chunk_size;
+            let end = (start + chunk_size).min(my_slots.len());
+            if start >= end {
+                continue;
+            }
+            let worker_slots: Vec<u64> = my_slots[start..end].to_vec();
+            let client = client.clone();
+            let stats = Arc::clone(&stats);
+            let rpc_url = config.url.clone();
+            let api_key = api_key.clone();
 
-        handles.push(tokio::spawn(async move {
-            run_key_worker(key_idx, api_key, rpc_url, my_slots, client, stats).await;
-        }));
+            handles.push(tokio::spawn(async move {
+                run_key_worker(key_idx, api_key, rpc_url, worker_slots, client, stats).await;
+            }));
+        }
     }
 
     for h in handles {
