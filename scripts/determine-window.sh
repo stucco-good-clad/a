@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${KEY_1:?KEY_1 is required}"
-: "${RPC_URL:?RPC_URL is required}"
 : "${GIST_ID:?GIST_ID is required}"
+: "${ONFINALITY_KEYS:?ONFINALITY_KEYS is required}"
 
 get_current_slot() {
-  local resp slot
-  resp=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
+  local key resp slot
+  key=$(echo "$ONFINALITY_KEYS" | cut -d',' -f1)
+  resp=$(curl -s -X POST "https://solana.api.onfinality.io/rpc?apikey=${key}" \
     -H "Content-Type: application/json" \
     -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}')
   slot=$(echo "$resp" | jq -r '.result // empty')

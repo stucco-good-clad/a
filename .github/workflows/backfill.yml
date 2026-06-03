@@ -18,12 +18,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Select best Orbitflare endpoint
-        id: select-rpc
-        env:
-          KEY_1: ${{ secrets.KEY_1 }}
-        run: bash scripts/select-rpc.sh
-
       - name: Detect OnFinality keys
         id: detect-of
         env:
@@ -34,26 +28,23 @@ jobs:
         run: |
           set +e
           KEYS=""
-          URLS=""
           for N in 1 2 3 4; do
             VAR="ON${N}"
             VAL="${!VAR}"
             if [ -n "$VAL" ]; then
-              if [ -n "$KEYS" ]; then KEYS="${KEYS},"; URLS="${URLS},"; fi
+              if [ -n "$KEYS" ]; then KEYS="${KEYS},"; fi
               KEYS="${KEYS}${VAL}"
-              URLS="${URLS}https://solana.api.onfinality.io/rpc"
               echo "  on${N}: ${VAL:0:8}..."
             fi
           done
           N=$(echo "$KEYS" | tr ',' '\n' | wc -l)
           if [ "$N" -eq 0 ] || [ -z "$KEYS" ]; then
-            N=0
-            echo "  none found"
+            echo "ERROR: No OnFinality keys found" >&2
+            exit 1
           fi
           echo ""
-          echo "  total: ${N} OnFinality keys"
+          echo "  total: ${N} keys"
           echo "n=${N}" >> "$GITHUB_OUTPUT"
-          echo "urls=${URLS}" >> "$GITHUB_OUTPUT"
           echo "keys=${KEYS}" >> "$GITHUB_OUTPUT"
 
       - name: Determine window
@@ -61,15 +52,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GIST_ID: ${{ secrets.GIST_ID }}
-          KEY_1: ${{ secrets.KEY_1 }}
-          RPC_URL: ${{ steps.select-rpc.outputs.rpc_url }}
+          ONFINALITY_KEYS: ${{ steps.detect-of.outputs.keys }}
         run: bash scripts/determine-window.sh
 
       - name: Fetch valid blocks in window
         id: fetch
         env:
-          KEY_1: ${{ secrets.KEY_1 }}
-          RPC_URL: ${{ steps.select-rpc.outputs.rpc_url }}
+          ONFINALITY_KEYS: ${{ steps.detect-of.outputs.keys }}
           START: ${{ steps.window.outputs.start }}
           END: ${{ steps.window.outputs.end }}
         run: bash scripts/fetch-slots.sh
@@ -81,28 +70,25 @@ jobs:
 
       - name: Fetch raw blocks
         env:
-          KEY_1: ${{ secrets.KEY_1 }}
-          RPC_URL: ${{ steps.select-rpc.outputs.rpc_url }}
-          RPC_URLS: ${{ steps.detect-of.outputs.urls }}
           ONFINALITY_KEYS: ${{ steps.detect-of.outputs.keys }}
           API_KEY_PARAM: "apikey"
+          RPC_URLS: "https://solana.api.onfinality.io/rpc"
+          BATCH_SIZE: "10"
+          MAX_CONCURRENT: "40"
         run: |
           set -euo pipefail
           rm -rf raw
           mkdir -p raw
 
           N=${{ steps.detect-of.outputs.n }}
-          if [ "$N" -gt 0 ]; then
-            echo "Using ${N} OnFinality keys (parallel)"
-            IFS=',' read -ra OF_KEYS <<< "$ONFINALITY_KEYS"
-            for i in "${!OF_KEYS[@]}"; do
-              export "KEY_$((i+1))=${OF_KEYS[$i]}"
-            done
-            ./target/release/batch-blocks --slots-file slots.txt
-          else
-            echo "No OnFinality keys — using Orbitflare"
-            ./target/release/batch-blocks --slots-file slots.txt
-          fi
+          IFS=',' read -ra KEYS <<< "$ONFINALITY_KEYS"
+          for i in "${!KEYS[@]}"; do
+            export "KEY_$((i+1))=${KEYS[$i]}"
+          done
+
+          echo "Fetching with ${N} keys, batch_size=10, concurrency=40"
+          echo "Target: ~${N}0 RPS (10 per key)"
+          ./target/release/batch-blocks --slots-file slots.txt
 
       - name: Extract SOL/USD OHLCV
         run: |
