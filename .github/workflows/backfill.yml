@@ -71,9 +71,7 @@ jobs:
       - name: Fetch raw blocks
         env:
           ONFINALITY_KEYS: ${{ steps.detect-of.outputs.keys }}
-          API_KEY_PARAM: "apikey"
           RPC_URLS: "https://solana.api.onfinality.io/rpc"
-          BATCH_SIZE: "10"
           MAX_CONCURRENT: "40"
         run: |
           set -euo pipefail
@@ -86,8 +84,7 @@ jobs:
             export "KEY_$((i+1))=${KEYS[$i]}"
           done
 
-          echo "Fetching with ${N} keys, batch_size=10, concurrency=40"
-          echo "Target: ~${N}0 RPS (10 per key)"
+          echo "Fetching with ${N} keys, concurrency=40, individual requests"
           ./target/release/batch-blocks --slots-file slots.txt
 
       - name: Extract SOL/USD OHLCV

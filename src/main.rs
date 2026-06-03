@@ -7,9 +7,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
-const DEFAULT_BATCH_SIZE: usize = 10;
 const DEFAULT_NUM_BLOCKS: usize = 1000;
-const MAX_CONCURRENT_REQUESTS: usize = 20;
+const MAX_CONCURRENT_REQUESTS: usize = 40;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_RETRY_ATTEMPTS: u32 = 3;
 const INITIAL_RETRY_DELAY_MS: u64 = 1000;
@@ -17,7 +16,6 @@ const INITIAL_RETRY_DELAY_MS: u64 = 1000;
 struct RpcConfig {
     url: String,
     keys: Vec<String>,
-    batch_size: usize,
 }
 
 struct FetchStats {
@@ -26,8 +24,8 @@ struct FetchStats {
     block_filtered: AtomicU64,
     tx_total: AtomicU64,
     tx_kept: AtomicU64,
-    batch_ok: AtomicU64,
-    batch_err: AtomicU64,
+    req_ok: AtomicU64,
+    req_err: AtomicU64,
     per_key_ok: Vec<AtomicU64>,
     per_key_err: Vec<AtomicU64>,
 }
@@ -40,8 +38,8 @@ impl FetchStats {
             block_filtered: AtomicU64::new(0),
             tx_total: AtomicU64::new(0),
             tx_kept: AtomicU64::new(0),
-            batch_ok: AtomicU64::new(0),
-            batch_err: AtomicU64::new(0),
+            req_ok: AtomicU64::new(0),
+            req_err: AtomicU64::new(0),
             per_key_ok: (0..n_keys).map(|_| AtomicU64::new(0)).collect(),
             per_key_err: (0..n_keys).map(|_| AtomicU64::new(0)).collect(),
         }
@@ -64,19 +62,10 @@ fn load_config() -> Result<RpcConfig, Box<dyn std::error::Error>> {
         return Err("At least KEY_1 must be set".into());
     }
 
-    let batch_size: usize = env::var("BATCH_SIZE")
-        .unwrap_or_else(|_| DEFAULT_BATCH_SIZE.to_string())
-        .parse()
-        .unwrap_or(DEFAULT_BATCH_SIZE);
-
     println!("RPC URL: {}", url);
-    println!("Keys: {} (round-robin, 10 RPS each)", keys.len());
+    println!("Keys: {} (round-robin, ~10 RPS each)", keys.len());
 
-    Ok(RpcConfig {
-        url,
-        keys,
-        batch_size,
-    })
+    Ok(RpcConfig { url, keys })
 }
 
 fn read_slots_from_file(path: &str) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
@@ -108,7 +97,7 @@ async fn get_current_slot(
         "jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []
     });
     let resp: Value = client
-        .post(format!("{}?api_key={}", rpc_url, api_key))
+        .post(format!("{}?apikey={}", rpc_url, api_key))
         .json(&body)
         .send()
         .await?
@@ -153,7 +142,7 @@ async fn discover_slots(
             "params": [range_start, search_end]
         });
         let resp: Value = client
-            .post(format!("{}?api_key={}", rpc_url, api_key))
+            .post(format!("{}?apikey={}", rpc_url, api_key))
             .json(&body)
             .send()
             .await?
@@ -178,7 +167,6 @@ async fn discover_slots(
         );
     }
 
-    // Take the last `num_blocks` blocks (most recent)
     let slots: Vec<u64> = all_blocks
         .into_iter()
         .rev()
@@ -243,66 +231,70 @@ fn write_block(slot: u64, block: &Value, stats: &FetchStats) {
     }
 }
 
-async fn fetch_batch_with_retry(
+async fn fetch_block_with_retry(
     client: reqwest::Client,
     url: String,
-    batch_reqs: Vec<Value>,
-    slot_batch: Vec<u64>,
+    slot: u64,
     stats: Arc<FetchStats>,
     key_idx: usize,
 ) {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getBlock",
+        "params": [
+            slot,
+            {
+                "encoding": "json",
+                "transactionDetails": "full",
+                "rewards": false,
+                "maxSupportedTransactionVersion": 0
+            }
+        ]
+    });
+
     let mut last_error = None;
 
     for attempt in 0..MAX_RETRY_ATTEMPTS {
-        match client.post(&url).json(&batch_reqs).send().await {
+        match client.post(&url).json(&body).send().await {
             Ok(resp) => {
                 if resp.status().is_success() {
-                    stats.batch_ok.fetch_add(1, Ordering::Relaxed);
+                    stats.req_ok.fetch_add(1, Ordering::Relaxed);
                     stats.per_key_ok[key_idx].fetch_add(1, Ordering::Relaxed);
 
                     match resp.json::<Value>().await {
-                        Ok(results) => {
-                            if let Some(arr) = results.as_array() {
-                                for item in arr {
-                                    let req_id = item["id"].as_u64().unwrap_or(0) as usize;
-                                    if req_id == 0 || req_id > slot_batch.len() {
-                                        continue;
-                                    }
-                                    let slot = slot_batch[req_id - 1];
-
-                                    if let Some(block) = item.get("result") {
-                                        if block.is_object() {
-                                            stats.tx_total.fetch_add(
-                                                block
-                                                    .get("transactions")
-                                                    .and_then(|v| v.as_array())
-                                                    .map(|a| a.len() as u64)
-                                                    .unwrap_or(0),
-                                                Ordering::Relaxed,
-                                            );
-                                            if let Some((filtered, _total, kept, dropped)) =
-                                                filter_block(block)
-                                            {
-                                                stats.tx_kept.fetch_add(kept, Ordering::Relaxed);
-                                                if dropped > 0 {
-                                                    stats
-                                                        .block_filtered
-                                                        .fetch_add(1, Ordering::Relaxed);
-                                                }
-                                                write_block(slot, &filtered, &stats);
-                                            }
-                                        } else if block.is_null() {
-                                            stats.block_err.fetch_add(1, Ordering::Relaxed);
+                        Ok(result) => {
+                            if let Some(block) = result.get("result") {
+                                if block.is_object() {
+                                    stats.tx_total.fetch_add(
+                                        block
+                                            .get("transactions")
+                                            .and_then(|v| v.as_array())
+                                            .map(|a| a.len() as u64)
+                                            .unwrap_or(0),
+                                        Ordering::Relaxed,
+                                    );
+                                    if let Some((filtered, _total, kept, dropped)) =
+                                        filter_block(block)
+                                    {
+                                        stats.tx_kept.fetch_add(kept, Ordering::Relaxed);
+                                        if dropped > 0 {
+                                            stats
+                                                .block_filtered
+                                                .fetch_add(1, Ordering::Relaxed);
                                         }
-                                    } else if item.get("error").is_some() {
-                                        stats.block_err.fetch_add(1, Ordering::Relaxed);
+                                        write_block(slot, &filtered, &stats);
                                     }
+                                } else if block.is_null() {
+                                    stats.block_err.fetch_add(1, Ordering::Relaxed);
                                 }
+                            } else if result.get("error").is_some() {
+                                stats.block_err.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                         Err(e) => {
-                            eprintln!("Warning: failed to parse batch response: {}", e);
-                            stats.batch_err.fetch_add(1, Ordering::Relaxed);
+                            eprintln!("Warning: failed to parse response for slot {}: {}", slot, e);
+                            stats.req_err.fetch_add(1, Ordering::Relaxed);
                             stats.per_key_err[key_idx].fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -316,20 +308,19 @@ async fn fetch_batch_with_retry(
             }
         }
 
-        // Exponential backoff before retry
         if attempt < MAX_RETRY_ATTEMPTS - 1 {
             let delay = Duration::from_millis(INITIAL_RETRY_DELAY_MS * 2u64.pow(attempt));
             tokio::time::sleep(delay).await;
         }
     }
 
-    // All retries exhausted
     eprintln!(
-        "Error: batch failed after {} attempts: {}",
+        "Error: slot {} failed after {} attempts: {}",
+        slot,
         MAX_RETRY_ATTEMPTS,
         last_error.unwrap_or_else(|| "unknown error".to_string())
     );
-    stats.batch_err.fetch_add(1, Ordering::Relaxed);
+    stats.req_err.fetch_add(1, Ordering::Relaxed);
     stats.per_key_err[key_idx].fetch_add(1, Ordering::Relaxed);
 }
 
@@ -342,10 +333,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .build()?;
 
-    // Ensure raw/ directory exists
     fs::create_dir_all("raw")?;
 
-    // Determine slots to fetch
     let args: Vec<String> = env::args().collect();
     let slots: Vec<u64> = if args.len() > 2 && args[1] == "--slots-file" {
         read_slots_from_file(&args[2])?
@@ -381,13 +370,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write("range.txt", format!("{}-{}", first_slot, last_slot))?;
 
     println!(
-        "Fetching {} blocks (slots {}-{}), {} per batch, {} keys",
-        actual, first_slot, last_slot, config.batch_size, n_keys
+        "Fetching {} blocks (slots {}-{}), {} keys, individual requests",
+        actual, first_slot, last_slot, n_keys
     );
-
-    let batches: Vec<Vec<u64>> = slots.chunks(config.batch_size).map(|c| c.to_vec()).collect();
-    let total_batches = batches.len();
-    println!("Total batches: {}", total_batches);
 
     let max_concurrent: usize = env::var("MAX_CONCURRENT")
         .unwrap_or_else(|_| MAX_CONCURRENT_REQUESTS.to_string())
@@ -400,9 +385,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let keys = Arc::new(config.keys);
     let rpc_url = Arc::new(config.url);
 
-    let mut handles = Vec::with_capacity(total_batches);
+    let mut handles = Vec::with_capacity(actual);
 
-    for (batch_idx, slot_batch) in batches.into_iter().enumerate() {
+    for (slot_idx, &slot) in slots.iter().enumerate() {
         let client = client.clone();
         let keys = Arc::clone(&keys);
         let rpc_url = Arc::clone(&rpc_url);
@@ -412,28 +397,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let handle = tokio::spawn(async move {
             let _permit = semaphore.acquire().await.expect("semaphore closed");
 
-            let key_idx = batch_idx % keys.len();
+            let key_idx = slot_idx % keys.len();
             let url = format!("{}?apikey={}", rpc_url, keys[key_idx]);
 
-            let mut batch_reqs = Vec::with_capacity(slot_batch.len());
-            for (i, &slot) in slot_batch.iter().enumerate() {
-                batch_reqs.push(json!({
-                    "jsonrpc": "2.0",
-                    "id": i + 1,
-                    "method": "getBlock",
-                    "params": [
-                        slot,
-                        {
-                            "encoding": "json",
-                            "transactionDetails": "full",
-                            "rewards": false,
-                            "maxSupportedTransactionVersion": 0
-                        }
-                    ]
-                }));
-            }
-
-            fetch_batch_with_retry(client, url, batch_reqs, slot_batch, stats, key_idx).await;
+            fetch_block_with_retry(client, url, slot, stats, key_idx).await;
         });
         handles.push(handle);
     }
@@ -448,14 +415,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_elapsed = total_start.elapsed();
     let total_ok = stats.block_ok.load(Ordering::Relaxed);
     let total_err = stats.block_err.load(Ordering::Relaxed);
-    let b_ok = stats.batch_ok.load(Ordering::Relaxed);
-    let b_err = stats.batch_err.load(Ordering::Relaxed);
+    let r_ok = stats.req_ok.load(Ordering::Relaxed);
+    let r_err = stats.req_err.load(Ordering::Relaxed);
     let dur_s = total_elapsed.as_secs_f64();
 
     println!();
     println!("=== Results ===");
     println!("  Duration:     {:.2}s", dur_s);
-    println!("  Batches ok:   {}/{} ({} err)", b_ok, total_batches, b_err);
+    println!("  Requests ok:  {} ({} err)", r_ok, r_err);
     println!("  Blocks saved: {}", total_ok);
     println!("  Blocks err:   {}", total_err);
     let total_filtered = stats.block_filtered.load(Ordering::Relaxed);
@@ -470,11 +437,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Blocks/s:     {:.0}", total_ok as f64 / dur_s);
     }
     println!();
-    println!("  Per-key batch distribution:");
+    println!("  Per-key distribution:");
     for idx in 0..n_keys {
         let ok = stats.per_key_ok[idx].load(Ordering::Relaxed);
         let err = stats.per_key_err[idx].load(Ordering::Relaxed);
-        println!("    key{}: {} batches ok, {} err", idx + 1, ok, err);
+        println!("    key{}: {} ok, {} err", idx + 1, ok, err);
     }
 
     Ok(())
