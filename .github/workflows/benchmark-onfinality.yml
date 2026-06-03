@@ -2,11 +2,6 @@ name: benchmark-onfinality
 
 on:
   workflow_dispatch:
-    inputs:
-      num_blocks:
-        description: 'Blocks per test'
-        required: false
-        default: '200'
 
 permissions:
   contents: read
@@ -15,14 +10,6 @@ jobs:
   benchmark:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-        with:
-          token: ${{ github.token }}
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
       - name: Detect OnFinality keys
         id: detect-of
         env:
@@ -40,7 +27,7 @@ jobs:
             if [ -n "$VAL" ]; then
               if [ -n "$KEYS" ]; then KEYS="${KEYS},"; fi
               KEYS="${KEYS}${VAL}"
-              echo "  on${N}: ${VAL:0:8}..."
+              echo "on${N}: ${VAL:0:8}..."
             fi
           done
           N=$(echo "$KEYS" | tr ',' '\n' | wc -l)
@@ -48,124 +35,82 @@ jobs:
             echo "ERROR: No OnFinality keys found" >&2
             exit 1
           fi
-          echo ""
-          echo "  total: ${N} keys"
+          echo "total: ${N} keys"
           echo "n=${N}" >> "$GITHUB_OUTPUT"
           echo "keys=${KEYS}" >> "$GITHUB_OUTPUT"
 
-      - name: Build binary
-        run: cargo build --release --bin batch-blocks
-
-      - name: Benchmark getSlot (pure RPS)
-        id: bench-slot
+      - name: Get a recent slot number
+        id: get-slot
         env:
-          ONFINALITY_KEYS: ${{ steps.detect-of.outputs.keys }}
-          N: ${{ steps.detect-of.outputs.n }}
-          NUM_BLOCKS: ${{ github.event.inputs.num_blocks || '200' }}
+          ON1: ${{ secrets.on1 }}
+        run: |
+          SLOT=$(curl -s -X POST "https://solana.api.onfinality.io/rpc?apikey=${ON1}" \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}' \
+            | jq -r '.result')
+          # Use slot 1000 behind current to ensure it's finalized
+          TEST_SLOT=$((SLOT - 1000))
+          echo "Current slot: ${SLOT}"
+          echo "Test slot: ${TEST_SLOT}"
+          echo "slot=${TEST_SLOT}" >> "$GITHUB_OUTPUT"
+
+      - name: Benchmark getBlock full (10 iterations, all keys)
+        env:
+          KEYS: ${{ steps.detect-of.outputs.keys }}
+          SLOT: ${{ steps.get-slot.outputs.slot }}
         run: |
           set -euo pipefail
 
-          IFS=',' read -ra KEYS <<< "$ONFINALITY_KEYS"
-          for i in "${!KEYS[@]}"; do
-            export "KEY_$((i+1))=${KEYS[$i]}"
-          done
+          IFS=',' read -ra KEY_ARRAY <<< "$KEYS"
+          N=${#KEY_ARRAY[@]}
 
-          echo "=== BENCHMARK: getSlot (pure RPS) ==="
-          echo "Keys: $N, Blocks: $NUM_BLOCKS"
+          echo "=== getBlock full benchmark ==="
+          echo "Slot: ${SLOT}"
+          echo "Keys: ${N}"
+          echo "Each iteration: pick a random key, call getBlock full, measure wall-clock time"
           echo ""
 
-          # Test matrix: RPS_PER_KEY x WORKERS_PER_KEY
-          RESULTS=""
-          for RPS in 10 15 20 25 30 40 50; do
-            for WPK in 1 2; do
-              TOTAL_WORKERS=$((N * WPK))
-              EXPECTED=$((RPS * TOTAL_WORKERS))
-              echo "--- Test: ${N} keys × ${WPK} workers × ${RPS} RPS = ${EXPECTED} expected RPS ---"
+          TOTAL_MS=0
+          MIN_MS=999999
+          MAX_MS=0
 
-              export RPS_PER_KEY="$RPS"
-              export WORKERS_PER_KEY="$WPK"
-              export BENCHMARK_MODE="1"
+          for i in $(seq 1 10); do
+            KEY_IDX=$((RANDOM % N))
+            API_KEY="${KEY_ARRAY[$KEY_IDX]}"
+            URL="https://solana.api.onfinality.io/rpc?apikey=${API_KEY}"
 
-              START=$(date +%s)
-              OUTPUT=$(./target/release/batch-blocks --num-blocks "$NUM_BLOCKS" 2>&1) || true
-              END=$(date +%s)
-              ELAPSED=$((END - START))
+            START_NS=$(date +%s%N)
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST "$URL" \
+              -H "Content-Type: application/json" \
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\",\"params\":[${SLOT},{\"encoding\":\"json\",\"transactionDetails\":\"full\",\"rewards\":false,\"maxSupportedTransactionVersion\":0}]}")
+            END_NS=$(date +%s%N)
 
-              # Extract actual blocks/s from output
-              ACTUAL_RPS=$(echo "$OUTPUT" | grep "Blocks/s:" | tail -1 | awk '{print $2}')
-              REQ_OK=$(echo "$OUTPUT" | grep "Requests ok:" | awk '{print $3}')
-              REQ_ERR=$(echo "$OUTPUT" | grep "Requests ok:" | sed 's/.*(\(.*\) err)/\1/')
+            ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
+            TOTAL_MS=$((TOTAL_MS + ELAPSED_MS))
 
-              echo "  Elapsed: ${ELAPSED}s, RPS: ${ACTUAL_RPS}, OK: ${REQ_OK}, ERR: ${REQ_ERR}"
-              RESULTS="${RESULTS}| ${N}k×${WPK}w×${RPS}rps | ${EXPECTED} | ${ACTUAL_RPS:-0} | ${ELAPSED}s | ${REQ_OK:-0} | ${REQ_ERR:-0}\n"
+            if [ "$ELAPSED_MS" -lt "$MIN_MS" ]; then MIN_MS=$ELAPSED_MS; fi
+            if [ "$ELAPSED_MS" -gt "$MAX_MS" ]; then MAX_MS=$ELAPSED_MS; fi
+
+            # Get response size for the first call only (to avoid re-downloading)
+            if [ "$i" -eq 1 ]; then
+              SIZE_BYTES=$(curl -s -X POST "$URL" \
+                -H "Content-Type: application/json" \
+                -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\",\"params\":[${SLOT},{\"encoding\":\"json\",\"transactionDetails\":\"full\",\"rewards\":false,\"maxSupportedTransactionVersion\":0}]}" \
+                | wc -c)
+              SIZE_MB=$(echo "scale=2; ${SIZE_BYTES} / 1048576" | bc)
+              echo "Response size: ${SIZE_MB} MB (${SIZE_BYTES} bytes)"
               echo ""
-            done
+            fi
+
+            printf "  [%2d/10] key%d  HTTP %s  %d ms\n" "$i" "$((KEY_IDX + 1))" "$HTTP_CODE" "$ELAPSED_MS"
           done
 
-          echo "=== getSlot RESULTS ==="
-          echo -e "| Config | Expected RPS | Actual RPS | Time | OK | ERR |"
-          echo -e "|--------|-------------|-----------|------|-----|-----|"
-          echo -e "$RESULTS"
-
-      - name: Benchmark getBlock full (realistic)
-        id: bench-block
-        env:
-          ONFINALITY_KEYS: ${{ steps.detect-of.outputs.keys }}
-          N: ${{ steps.detect-of.outputs.n }}
-          NUM_BLOCKS: ${{ github.event.inputs.num_blocks || '200' }}
-        run: |
-          set -euo pipefail
-
-          IFS=',' read -ra KEYS <<< "$ONFINALITY_KEYS"
-          for i in "${!KEYS[@]}"; do
-            export "KEY_$((i+1))=${KEYS[$i]}"
-          done
-
-          echo "=== BENCHMARK: getBlock full (realistic) ==="
-          echo "Keys: $N, Blocks: $NUM_BLOCKS"
+          AVG_MS=$((TOTAL_MS / 10))
           echo ""
-
-          RESULTS=""
-          for RPS in 5 10 15 20 25 30; do
-            for WPK in 1 2; do
-              TOTAL_WORKERS=$((N * WPK))
-              EXPECTED=$((RPS * TOTAL_WORKERS))
-              echo "--- Test: ${N} keys × ${WPK} workers × ${RPS} RPS = ${EXPECTED} expected RPS ---"
-
-              export RPS_PER_KEY="$RPS"
-              export WORKERS_PER_KEY="$WPK"
-              export BENCHMARK_MODE="0"
-
-              START=$(date +%s)
-              OUTPUT=$(./target/release/batch-blocks --num-blocks "$NUM_BLOCKS" 2>&1) || true
-              END=$(date +%s)
-              ELAPSED=$((END - START))
-
-              ACTUAL_RPS=$(echo "$OUTPUT" | grep "Blocks/s:" | tail -1 | awk '{print $2}')
-              REQ_OK=$(echo "$OUTPUT" | grep "Requests ok:" | awk '{print $3}')
-              REQ_ERR=$(echo "$OUTPUT" | grep "Requests ok:" | sed 's/.*(\(.*\) err)/\1/')
-              BLOCKS_OK=$(echo "$OUTPUT" | grep "Blocks saved:" | awk '{print $3}')
-
-              echo "  Elapsed: ${ELAPSED}s, RPS: ${ACTUAL_RPS}, Blocks: ${BLOCKS_OK}, OK: ${REQ_OK}, ERR: ${REQ_ERR}"
-              RESULTS="${RESULTS}| ${N}k×${WPK}w×${RPS}rps | ${EXPECTED} | ${ACTUAL_RPS:-0} | ${ELAPSED}s | ${BLOCKS_OK:-0} | ${REQ_OK:-0} | ${REQ_ERR:-0}\n"
-              echo ""
-            done
-          done
-
-          echo "=== getBlock RESULTS ==="
-          echo -e "| Config | Expected RPS | Actual RPS | Time | Blocks | OK | ERR |"
-          echo -e "|--------|-------------|-----------|------|--------|-----|-----|"
-          echo -e "$RESULTS"
-
-      - name: Summary
-        if: always()
-        run: |
-          echo "========================================="
-          echo "  ONFINALITY BENCHMARK COMPLETE"
-          echo "========================================="
-          echo ""
-          echo "Keys used: ${{ steps.detect-of.outputs.n }}"
-          echo "Blocks per test: ${{ github.event.inputs.num_blocks || '200' }}"
-          echo ""
-          echo "Review getSlot and getBlock results above."
-          echo "Choose the config with highest Actual RPS and 0 ERR."
+          echo "=== RESULTS ==="
+          echo "  Min:    ${MIN_MS} ms"
+          echo "  Max:    ${MAX_MS} ms"
+          echo "  Avg:    ${AVG_MS} ms"
+          echo "  Blocks/s (serial): $(echo "scale=2; 1000 / ${AVG_MS}" | bc)"
+          echo "  Theoretical 5-key parallel: $(echo "scale=2; 5000 / ${AVG_MS}" | bc) blocks/s"
