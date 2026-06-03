@@ -59,6 +59,8 @@ jobs:
       - name: Determine window
         id: window
         env:
+          GH_TOKEN: ${{ github.token }}
+          GIST_ID: ${{ secrets.GIST_ID }}
           KEY_1: ${{ secrets.KEY_1 }}
           RPC_URL: ${{ steps.select-rpc.outputs.rpc_url }}
         run: bash scripts/determine-window.sh
@@ -92,12 +94,10 @@ jobs:
           N=${{ steps.detect-of.outputs.n }}
           if [ "$N" -gt 0 ]; then
             echo "Using ${N} OnFinality keys (parallel)"
-            # Pass OnFinality keys as KEY_1..KEY_N
             IFS=',' read -ra OF_KEYS <<< "$ONFINALITY_KEYS"
             for i in "${!OF_KEYS[@]}"; do
               export "KEY_$((i+1))=${OF_KEYS[$i]}"
             done
-            # RPC_URLS already set from detect step
             ./target/release/batch-blocks --slots-file slots.txt
           else
             echo "No OnFinality keys — using Orbitflare"
@@ -112,7 +112,7 @@ jobs:
       - name: Download Binance 1s klines
         env:
           SYMBOLS: SOLUSDT,BTCUSDT,ETHUSDT,SOLETH,SOLUSDC,ETHBTC,BNBUSDT,XRPUSDT,DOGEUSDT
-          BINANCE_DOWNLOADER: ./target/release/binance-downloader
+          BINANCE_DOWNLOADER: ${{ github.workspace }}/target/release/binance-downloader
         run: bash scripts/download-klines.sh
 
       - name: Enrich blocks with CEX data
@@ -146,11 +146,8 @@ jobs:
 
       - name: Update state
         env:
+          GH_TOKEN: ${{ github.token }}
+          GIST_ID: ${{ secrets.GIST_ID }}
           END: ${{ steps.window.outputs.end }}
           COUNT: ${{ steps.fetch.outputs.count }}
         run: bash scripts/update-state.sh
-
-      - name: Commit state
-        env:
-          END: ${{ steps.window.outputs.end }}
-        run: bash scripts/commit-state.sh

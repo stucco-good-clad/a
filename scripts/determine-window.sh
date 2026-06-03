@@ -3,6 +3,7 @@ set -euo pipefail
 
 : "${KEY_1:?KEY_1 is required}"
 : "${RPC_URL:?RPC_URL is required}"
+: "${GIST_ID:?GIST_ID is required}"
 
 get_current_slot() {
   local resp slot
@@ -17,8 +18,10 @@ get_current_slot() {
   echo "$slot"
 }
 
-if [ -f state.json ]; then
-  NEXT_START=$(jq -r '.next_start_slot' state.json)
+STATE=$(gh gist view "$GIST_ID" -f state.json 2>/dev/null || echo "")
+
+if [ -n "$STATE" ] && echo "$STATE" | jq -e '.next_start_slot' >/dev/null 2>&1; then
+  NEXT_START=$(echo "$STATE" | jq -r '.next_start_slot')
   START=$NEXT_START
   CURRENT=$(get_current_slot)
   if [ "$START" -ge "$CURRENT" ]; then
@@ -31,7 +34,7 @@ if [ -f state.json ]; then
       END=$CURRENT
     fi
   fi
-  echo "Resuming from state: window $START to $END"
+  echo "Resuming from Gist state: window $START to $END"
 else
   CURRENT=$(get_current_slot)
   END=$CURRENT
