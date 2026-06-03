@@ -49,48 +49,6 @@ jobs:
             echo ""
           done
 
-      - name: Single key rate limit (getBlock)
-        env:
-          ON1: ${{ secrets.on1 }}
-        run: |
-          set +e
-          echo "==========================================="
-          echo "  Single Key Rate Limit — getBlock (on1)"
-          echo "==========================================="
-          echo ""
-
-          SLOT=423000000
-          BODY="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\",\"params\":[${SLOT},{\"encoding\":\"jsonParsed\",\"transactionDetails\":\"none\",\"rewards\":false,\"maxSupportedTransactionVersion\":0}]}"
-          URL="https://solana.api.onfinality.io/rpc?apikey=${ON1}"
-          MAX_OK=0
-
-          for RPS in 5 10 15 20 25 30 40 50; do
-            TMPDIR=$(mktemp -d)
-            START_MS=$(date +%s%3N)
-            for i in $(seq 1 "$RPS"); do
-              curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
-                -X POST "$URL" \
-                -H "Content-Type: application/json" \
-                -d "$BODY" > "$TMPDIR/$i" &
-            done
-            wait
-            END_MS=$(date +%s%3N)
-            ELAPSED=$((END_MS - START_MS))
-            OK=$(grep -l "200" "$TMPDIR"/* 2>/dev/null | wc -l)
-            FAIL=$((RPS - OK))
-            rm -rf "$TMPDIR"
-
-            if [ "$FAIL" -eq 0 ]; then
-              echo "  ${RPS} RPS: ${OK}/${RPS} ok (${ELAPSED}ms wall)"
-              MAX_OK=$RPS
-            else
-              echo "  ${RPS} RPS: ${OK}/${RPS} ok, ${FAIL} fail -- BREAKS"
-              break
-            fi
-          done
-          echo "  single key ceiling: ~${MAX_OK} RPS"
-          echo ""
-
       - name: 4 keys parallel rate limit (getBlock)
         env:
           ON1: ${{ secrets.on1 }}
@@ -102,6 +60,8 @@ jobs:
           echo "==========================================="
           echo "  4 Keys Parallel Rate Limit — getBlock"
           echo "==========================================="
+          echo ""
+          echo "  (all keys fresh — no prior load)"
           echo ""
 
           SLOT=423000000
@@ -159,6 +119,54 @@ jobs:
             sleep 2
           done
           echo "  4-key ceiling: ~${MAX_OK} RPS"
+          echo ""
+
+      - name: Cooldown (60s)
+        run: |
+          echo "Cooling down 60s before single-key test..."
+          sleep 60
+
+      - name: Single key rate limit (getBlock)
+        env:
+          ON1: ${{ secrets.on1 }}
+        run: |
+          set +e
+          echo "==========================================="
+          echo "  Single Key Rate Limit — getBlock (on1)"
+          echo "==========================================="
+          echo ""
+
+          SLOT=423000000
+          BODY="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\",\"params\":[${SLOT},{\"encoding\":\"jsonParsed\",\"transactionDetails\":\"none\",\"rewards\":false,\"maxSupportedTransactionVersion\":0}]}"
+          URL="https://solana.api.onfinality.io/rpc?apikey=${ON1}"
+          MAX_OK=0
+
+          for RPS in 5 10 15 20 25 30 40 50; do
+            TMPDIR=$(mktemp -d)
+            START_MS=$(date +%s%3N)
+            for i in $(seq 1 "$RPS"); do
+              curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
+                -X POST "$URL" \
+                -H "Content-Type: application/json" \
+                -d "$BODY" > "$TMPDIR/$i" &
+            done
+            wait
+            END_MS=$(date +%s%3N)
+            ELAPSED=$((END_MS - START_MS))
+            OK=$(grep -l "200" "$TMPDIR"/* 2>/dev/null | wc -l)
+            FAIL=$((RPS - OK))
+            rm -rf "$TMPDIR"
+
+            if [ "$FAIL" -eq 0 ]; then
+              echo "  ${RPS} RPS: ${OK}/${RPS} ok (${ELAPSED}ms wall)"
+              MAX_OK=$RPS
+            else
+              echo "  ${RPS} RPS: ${OK}/${RPS} ok, ${FAIL} fail -- BREAKS"
+              break
+            fi
+            sleep 2
+          done
+          echo "  single key ceiling: ~${MAX_OK} RPS"
           echo ""
 
       - name: Summary
