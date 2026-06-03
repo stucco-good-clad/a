@@ -37,13 +37,14 @@ curl -sL --max-time 30 -o "epoch-${EPOCH}.cid" \
 CID=$(cat "epoch-${EPOCH}.cid" | tr -d '[:space:]')
 echo "  CID: $CID"
 
-# --- Download indexes ---
+# --- Download indexes with progress ---
 echo "[3/5] Downloading indexes..."
 
 download_index() {
     local name=$1
     local file=$2
     local min_size=${3:-100}
+    local threshold=${4:-1048576}
 
     if [ -f "$file" ]; then
         local fsize
@@ -56,8 +57,16 @@ download_index() {
 
     local start_time
     start_time=$(date +%s)
-    echo -n "  $name: downloading..."
-    curl -sL --max-time 1800 -o "$file" "$OF1_BASE/$EPOCH/$file"
+
+    # Use progress bar for large files, simple output for small files
+    if [ "$threshold" -ge 1048576 ]; then
+        echo "  $name: downloading (progress bar)..."
+        curl -sL --max-time 3600 --progress-bar -o "$file" "$OF1_BASE/$EPOCH/$file" 2>&2
+    else
+        echo -n "  $name: downloading..."
+        curl -sL --max-time 300 -o "$file" "$OF1_BASE/$EPOCH/$file"
+    fi
+
     local end_time
     end_time=$(date +%s)
     local elapsed=$(( end_time - start_time ))
@@ -69,18 +78,25 @@ download_index() {
         rm -f "$file"
         return 1
     fi
-    echo " done ($(( fsize / 1048576 ))MB in ${elapsed}s, $(( fsize / elapsed / 1048576 ))MB/s)"
+
+    local speed="N/A"
+    if [ "$elapsed" -gt 0 ]; then
+        speed="$(( fsize / elapsed / 1048576 ))MB/s"
+    fi
+    echo "  $name: done ($(( fsize / 1048576 ))MB in ${elapsed}s, ${speed})"
 }
 
-download_index "slot-to-cid" "epoch-${EPOCH}-${CID}-mainnet-slot-to-cid.index" 100
-download_index "cid-to-offset-and-size" "epoch-${EPOCH}-${CID}-mainnet-cid-to-offset-and-size.index" 1048576
-download_index "sig-to-cid" "epoch-${EPOCH}-${CID}-mainnet-sig-to-cid.index" 1048576
-download_index "sig-exists" "epoch-${EPOCH}-${CID}-mainnet-sig-exists.index" 1048576
-download_index "slot-to-blocktime" "epoch-${EPOCH}-${CID}-mainnet-slot-to-blocktime.index" 100
+download_index "slot-to-cid" "epoch-${EPOCH}-${CID}-mainnet-slot-to-cid.index" 100 100
+download_index "cid-to-offset-and-size" "epoch-${EPOCH}-${CID}-mainnet-cid-to-offset-and-size.index" 1048576 1048576
+download_index "sig-to-cid" "epoch-${EPOCH}-${CID}-mainnet-sig-to-cid.index" 1048576 1048576
+download_index "sig-exists" "epoch-${EPOCH}-${CID}-mainnet-sig-exists.index" 1048576 1048576
+download_index "slot-to-blocktime" "epoch-${EPOCH}-${CID}-mainnet-slot-to-blocktime.index" 100 100
 
 if [ ! -f "${EPOCH}.slots.txt" ]; then
+    echo -n "  slots.txt: downloading..."
     curl -sL --max-time 60 -o "${EPOCH}.slots.txt" \
         "$OF1_BASE/$EPOCH/${EPOCH}.slots.txt" || true
+    echo "done"
 fi
 
 # --- Generate config ---
