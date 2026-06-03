@@ -1,0 +1,147 @@
+name: benchmark
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      rpc_url: ${{ steps.ping.outputs.rpc_url }}
+      start: ${{ steps.range.outputs.start }}
+      end: ${{ steps.range.outputs.end }}
+      count: ${{ steps.range.outputs.count }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Ping test and select server
+        id: ping
+        env:
+          KEY_1: ${{ secrets.KEY_1 }}
+        run: bash scripts/select-rpc.sh
+
+      - name: Get slot range
+        id: range
+        env:
+          KEY_1: ${{ secrets.KEY_1 }}
+          RPC_URL: ${{ steps.ping.outputs.rpc_url }}
+        run: |
+          CURRENT=$(curl -s -X POST "$RPC_URL?api_key=$KEY_1" \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}' \
+            | jq -r '.result')
+          START=$((CURRENT - 2000))
+          END=$((CURRENT - 1001))
+          echo "start=$START" >> "$GITHUB_OUTPUT"
+          echo "end=$END" >> "$GITHUB_OUTPUT"
+          echo "count=1000" >> "$GITHUB_OUTPUT"
+          echo "Range: $START to $END (1000 blocks)"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build binary
+        run: cargo build --release --bin batch-blocks
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: batch-blocks-bin
+          path: target/release/batch-blocks
+          retention-days: 1
+
+      - name: Upload slots
+        run: |
+          seq ${{ steps.range.outputs.start }} ${{ steps.range.outputs.end }} > slots.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slots-txt
+          path: slots.txt
+          retention-days: 1
+
+  bench:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        batch_size: [10, 20, 50]
+        concurrency: [20, 40, 60, 80, 100]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: batch-blocks-bin
+          path: bin/
+      - uses: actions/download-artifact@v4
+        with:
+          name: slots-txt
+          path: .
+
+      - run: chmod +x bin/batch-blocks
+
+      - name: Run bench (bs=${{ matrix.batch_size }}, c=${{ matrix.concurrency }})
+        id: run
+        env:
+          KEY_1: ${{ secrets.KEY_1 }}
+          RPC_URL: ${{ needs.setup.outputs.rpc_url }}
+          BATCH_SIZE: ${{ matrix.batch_size }}
+          MAX_CONCURRENT: ${{ matrix.concurrency }}
+        run: |
+          OUTPUT=$(bin/batch-blocks --slots-file slots.txt 2>&1) || true
+          echo "$OUTPUT"
+          echo "$OUTPUT" > bench-out.txt
+
+          BPS=$(echo "$OUTPUT" | grep "Blocks/s:" | awk '{print $2}' || echo "0")
+          BATCHES_OK=$(echo "$OUTPUT" | grep "Batches ok:" | head -1)
+          echo "blocks_per_sec=${BPS:-0}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: result-bs${{ matrix.batch_size }}-c${{ matrix.concurrency }}
+          path: bench-out.txt
+          retention-days: 1
+
+  summary:
+    needs: [setup, bench]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: false
+          path: results/
+
+      - name: Results table
+        run: |
+          echo "============================================="
+          echo "  Benchmark Results  (server: ${{ needs.setup.outputs.rpc_url }})"
+          echo "============================================="
+          echo ""
+          printf "%-8s %-12s %-12s\n" "Batch" "Concurrency" "Blocks/s"
+          printf "%-8s %-12s %-12s\n" "-----" "-----------" "--------"
+
+          BEST_BPS=0
+          BEST_BS=""
+          BEST_C=""
+
+          for f in results/result-*/bench-out.txt; do
+            NAME=$(dirname "$f" | xargs basename | sed 's/result-//')
+            BS=$(echo "$NAME" | sed 's/.*-bs//' | sed 's/-c.*//')
+            C=$(echo "$NAME" | sed 's/.*-c//')
+            BPS=$(grep "Blocks/s:" "$f" 2>/dev/null | awk '{print $2}' || echo "?")
+            BATCHES=$(grep "Batches ok:" "$f" 2>/dev/null | head -1 || echo "")
+
+            printf "%-8s %-12s %-12s  %s\n" "$BS" "$C" "$BPS" "$BATCHES"
+
+            if [ "$BPS" != "?" ] && [ "$BPS" != "0" ] && [ -n "$BPS" ]; then
+              HIGHER=$(echo "$BPS $BEST_BPS" | awk '{if ($1 > $2) print 1; else print 0}')
+              if [ "$HIGHER" = "1" ]; then
+                BEST_BPS=$BPS
+                BEST_BS=$BS
+                BEST_C=$C
+              fi
+            fi
+          done
+
+          echo ""
+          echo "=== Sweet Spot ==="
+          echo "batch_size=$BEST_BS  concurrency=$BEST_C  →  $BEST_BPS blocks/s"
