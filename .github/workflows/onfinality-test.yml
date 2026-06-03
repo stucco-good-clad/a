@@ -11,26 +11,8 @@ jobs:
 
       - name: Detect available keys
         id: detect
-        run: |
-          set +e
-          KEYS=""
-          for N in 1 2 3 4 5 6 7 8 9 10; do
-            VAR="ON${N}"
-            VAL="${!VAR}"
-            if [ -n "$VAL" ]; then
-              if [ -n "$KEYS" ]; then KEYS="${KEYS} "; fi
-              KEYS="${KEYS}on${N}"
-              echo "  on${N}: ${VAL:0:8}..."
-            fi
-          done
-          N=$(echo "$KEYS" | wc -w)
-          echo ""
-          echo "  total: ${N} keys (${KEYS})"
-          echo "n=${N}" >> "$GITHUB_OUTPUT"
-          echo "keys=${KEYS}" >> "$GITHUB_OUTPUT"
-
-      - name: Ping test
         env:
+          ONFINALITY_KEYS: ${{ secrets.ONFINALITY_KEYS }}
           ON1: ${{ secrets.on1 }}
           ON2: ${{ secrets.on2 }}
           ON3: ${{ secrets.on3 }}
@@ -41,7 +23,47 @@ jobs:
           ON8: ${{ secrets.on8 }}
           ON9: ${{ secrets.on9 }}
           ON10: ${{ secrets.on10 }}
-          KEYS: ${{ steps.detect.outputs.keys }}
+        run: |
+          set +e
+          API_KEYS=()
+
+          if [ -n "$ONFINALITY_KEYS" ]; then
+            echo "Using ONFINALITY_KEYS secret (comma-separated)"
+            IFS=',' read -ra API_KEYS <<< "$ONFINALITY_KEYS"
+          else
+            echo "Falling back to individual on1-on10 secrets"
+            for N in $(seq 1 10); do
+              VAR="ON${N}"
+              VAL="${!VAR}"
+              if [ -n "$VAL" ]; then
+                API_KEYS+=("$VAL")
+              fi
+            done
+          fi
+
+          N=${#API_KEYS[@]}
+          echo ""
+          echo "  keys available: ${N}"
+          for i in "${!API_KEYS[@]}"; do
+            echo "  [$((i+1))] ${API_KEYS[$i]:0:8}..."
+          done
+          echo ""
+
+          echo "n=${N}" >> "$GITHUB_OUTPUT"
+
+      - name: Ping test
+        env:
+          ONFINALITY_KEYS: ${{ secrets.ONFINALITY_KEYS }}
+          ON1: ${{ secrets.on1 }}
+          ON2: ${{ secrets.on2 }}
+          ON3: ${{ secrets.on3 }}
+          ON4: ${{ secrets.on4 }}
+          ON5: ${{ secrets.on5 }}
+          ON6: ${{ secrets.on6 }}
+          ON7: ${{ secrets.on7 }}
+          ON8: ${{ secrets.on8 }}
+          ON9: ${{ secrets.on9 }}
+          ON10: ${{ secrets.on10 }}
         run: |
           set +e
           echo "==========================================="
@@ -51,15 +73,25 @@ jobs:
 
           BODY='{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}'
 
-          for LABEL in $KEYS; do
-            UPPER=$(echo "$LABEL" | tr '[:lower:]' '[:upper:]')
-            KEY="${!UPPER}"
+          API_KEYS=()
+          if [ -n "$ONFINALITY_KEYS" ]; then
+            IFS=',' read -ra API_KEYS <<< "$ONFINALITY_KEYS"
+          else
+            for N in $(seq 1 10); do
+              VAR="ON${N}"
+              VAL="${!VAR}"
+              if [ -n "$VAL" ]; then API_KEYS+=("$VAL"); fi
+            done
+          fi
+
+          for i in "${!API_KEYS[@]}"; do
+            KEY="${API_KEYS[$i]}"
             URL="https://solana.api.onfinality.io/rpc?apikey=${KEY}"
             PREFIX="${KEY:0:8}"
             TOTAL=0
 
-            echo "--- ${LABEL} (${PREFIX}...) ---"
-            for i in 1 2 3 4 5; do
+            echo "--- key $((i+1)) (${PREFIX}...) ---"
+            for j in 1 2 3 4 5; do
               RESP=$(curl -s -w "\n%{time_total}" --max-time 10 -X POST "$URL" \
                 -H "Content-Type: application/json" \
                 -d "$BODY")
@@ -67,7 +99,7 @@ jobs:
               TIME=$(echo "$RESP" | tail -n 1)
               MS=$(echo "$TIME" | awk '{printf "%.0f", $1 * 1000}')
               SLOT=$(echo "$BODY_R" | jq -r '.result // "error"' 2>/dev/null || echo "error")
-              echo "  ping $i: ${MS}ms (slot ${SLOT})"
+              echo "  ping $j: ${MS}ms (slot ${SLOT})"
               TOTAL=$((TOTAL + MS))
             done
             AVG=$((TOTAL / 5))
@@ -77,6 +109,7 @@ jobs:
 
       - name: All keys parallel rate limit (getBlock)
         env:
+          ONFINALITY_KEYS: ${{ secrets.ONFINALITY_KEYS }}
           ON1: ${{ secrets.on1 }}
           ON2: ${{ secrets.on2 }}
           ON3: ${{ secrets.on3 }}
@@ -87,35 +120,40 @@ jobs:
           ON8: ${{ secrets.on8 }}
           ON9: ${{ secrets.on9 }}
           ON10: ${{ secrets.on10 }}
-          N: ${{ steps.detect.outputs.n }}
-          KEYS: ${{ steps.detect.outputs.keys }}
         run: |
           set +e
           echo "==========================================="
-          echo "  ${N} Keys Parallel Rate Limit — getBlock"
+          echo "  All Keys Parallel Rate Limit — getBlock"
           echo "==========================================="
           echo ""
           echo "  (all keys fresh — no prior load)"
+          echo ""
+
+          API_KEYS=()
+          if [ -n "$ONFINALITY_KEYS" ]; then
+            IFS=',' read -ra API_KEYS <<< "$ONFINALITY_KEYS"
+          else
+            for N in $(seq 1 10); do
+              VAR="ON${N}"
+              VAL="${!VAR}"
+              if [ -n "$VAL" ]; then API_KEYS+=("$VAL"); fi
+            done
+          fi
+          N=${#API_KEYS[@]}
+          echo "  active keys: ${N}"
           echo ""
 
           SLOT=423000000
           BODY="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\",\"params\":[${SLOT},{\"encoding\":\"jsonParsed\",\"transactionDetails\":\"none\",\"rewards\":false,\"maxSupportedTransactionVersion\":0}]}"
 
           URLS=()
-          LABELS=()
-          for LABEL in $KEYS; do
-            UPPER=$(echo "$LABEL" | tr '[:lower:]' '[:upper:]')
-            KEY="${!UPPER}"
+          for KEY in "${API_KEYS[@]}"; do
             URLS+=("https://solana.api.onfinality.io/rpc?apikey=${KEY}")
-            LABELS+=("$LABEL")
           done
-          echo "  active keys: ${#URLS[@]}"
-          echo ""
 
           MAX_OK=0
-          N=${#URLS[@]}
 
-          for RPS in 10 20 30 40 50 60 80 100 120 150 200; do
+          for RPS in 10 20 30 40 50 60 80 100 120 150 200 300 400 500; do
             PER_KEY=$((RPS / N))
             REMAINING=$((RPS - PER_KEY * N))
             TMPDIR=$(mktemp -d)
@@ -130,7 +168,7 @@ jobs:
                 curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
                   -X POST "${URLS[$k]}" \
                   -H "Content-Type: application/json" \
-                  -d "$BODY" > "$TMPDIR/${LABELS[$k]}_${i}" &
+                  -d "$BODY" > "$TMPDIR/k${k}_${i}" &
               done
             done
             wait
@@ -152,7 +190,9 @@ jobs:
           done
           echo ""
           echo "  ${N}-key ceiling: ~${MAX_OK} RPS"
-          echo "  effective per-key: ~$((MAX_OK / N)) RPS"
+          if [ "$N" -gt 0 ]; then
+            echo "  effective per-key: ~$((MAX_OK / N)) RPS"
+          fi
           echo ""
 
       - name: Summary
@@ -160,11 +200,12 @@ jobs:
           N=${{ steps.detect.outputs.n }}
           echo "==========================================="
           echo "  ${N} keys detected"
-          echo "  RU/day: $((N * 400000))"
+          RU=$((N * 400000))
+          echo "  RU/day: ${RU}"
           echo "  RU for 1M blocks: 2000000"
-          if [ "$((N * 400000))" -ge 2000000 ]; then
+          if [ "$RU" -ge 2000000 ]; then
             echo "  1M blocks fits in daily quota: YES"
           else
-            echo "  1M blocks fits in daily quota: NO (need $((2000000 - N * 400000)) more RU)"
+            echo "  1M blocks fits in daily quota: NO (need $((2000000 - RU)) more RU)"
           fi
           echo "==========================================="
