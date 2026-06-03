@@ -11,26 +11,29 @@ jobs:
 
       - name: Detect available keys
         id: detect
+        env:
+          ON1: ${{ secrets.on1 }}
+          ON2: ${{ secrets.on2 }}
+          ON3: ${{ secrets.on3 }}
+          ON4: ${{ secrets.on4 }}
         run: |
           set +e
           API_KEYS=()
-
-          if [ -n "$ONFINALITY_KEYS" ]; then
-            IFS=',' read -ra API_KEYS <<< "$ONFINALITY_KEYS"
-          fi
-
-          N=${#API_KEYS[@]}
-          echo "  keys available: ${N}"
-          for i in "${!API_KEYS[@]}"; do
-            echo "  [$((i+1))] ${API_KEYS[$i]:0:8}..."
+          for N in 1 2 3 4; do
+            VAR="ON${N}"
+            VAL="${!VAR}"
+            if [ -n "$VAL" ]; then
+              API_KEYS+=("$VAL")
+              echo "  on${N}: ${VAL:0:8}..."
+            fi
           done
+          N=${#API_KEYS[@]}
           echo ""
+          echo "  total: ${N} keys"
           echo "n=${N}" >> "$GITHUB_OUTPUT"
           printf '%s\n' "${API_KEYS[@]}" > /tmp/keys.txt
 
       - name: Ping test
-        env:
-          ONFINALITY_KEYS: ${{ secrets.ONFINALITY_KEYS }}
         run: |
           set +e
           echo "==========================================="
@@ -66,8 +69,6 @@ jobs:
           done < /tmp/keys.txt
 
       - name: All keys parallel rate limit (getBlock)
-        env:
-          ONFINALITY_KEYS: ${{ secrets.ONFINALITY_KEYS }}
         run: |
           set +e
           echo "==========================================="
@@ -91,7 +92,7 @@ jobs:
 
           MAX_OK=0
 
-          for RPS in 10 20 30 40 50 60 80 100 120 150 200 300 400 500; do
+          for RPS in 10 20 30 40 50 60 80 100 120 150 200; do
             PER_KEY=$((RPS / N))
             REMAINING=$((RPS - PER_KEY * N))
             TMPDIR=$(mktemp -d)
