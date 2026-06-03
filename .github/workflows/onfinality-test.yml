@@ -12,7 +12,6 @@ jobs:
       - name: Detect available keys
         id: detect
         env:
-          ONFINALITY_KEYS: ${{ secrets.ONFINALITY_KEYS }}
           ON1: ${{ secrets.on1 }}
           ON2: ${{ secrets.on2 }}
           ON3: ${{ secrets.on3 }}
@@ -23,47 +22,71 @@ jobs:
           ON8: ${{ secrets.on8 }}
           ON9: ${{ secrets.on9 }}
           ON10: ${{ secrets.on10 }}
+          ON11: ${{ secrets.on11 }}
+          ON12: ${{ secrets.on12 }}
+          ON13: ${{ secrets.on13 }}
+          ON14: ${{ secrets.on14 }}
+          ON15: ${{ secrets.on15 }}
+          ON16: ${{ secrets.on16 }}
+          ON17: ${{ secrets.on17 }}
+          ON18: ${{ secrets.on18 }}
+          ON19: ${{ secrets.on19 }}
+          ON20: ${{ secrets.on20 }}
+          ON21: ${{ secrets.on21 }}
+          ON22: ${{ secrets.on22 }}
+          ON23: ${{ secrets.on23 }}
+          ON24: ${{ secrets.on24 }}
+          ON25: ${{ secrets.on25 }}
+          ON26: ${{ secrets.on26 }}
+          ON27: ${{ secrets.on27 }}
+          ON28: ${{ secrets.on28 }}
+          ON29: ${{ secrets.on29 }}
+          ON30: ${{ secrets.on30 }}
+          ON31: ${{ secrets.on31 }}
+          ON32: ${{ secrets.on32 }}
+          ON33: ${{ secrets.on33 }}
+          ON34: ${{ secrets.on34 }}
+          ON35: ${{ secrets.on35 }}
+          ON36: ${{ secrets.on36 }}
+          ON37: ${{ secrets.on37 }}
+          ON38: ${{ secrets.on38 }}
+          ON39: ${{ secrets.on39 }}
+          ON40: ${{ secrets.on40 }}
+          ON41: ${{ secrets.on41 }}
+          ON42: ${{ secrets.on42 }}
+          ON43: ${{ secrets.on43 }}
+          ON44: ${{ secrets.on44 }}
+          ON45: ${{ secrets.on45 }}
+          ON46: ${{ secrets.on46 }}
+          ON47: ${{ secrets.on47 }}
+          ON48: ${{ secrets.on48 }}
+          ON49: ${{ secrets.on49 }}
+          ON50: ${{ secrets.on50 }}
         run: |
           set +e
           API_KEYS=()
 
-          if [ -n "$ONFINALITY_KEYS" ]; then
-            echo "Using ONFINALITY_KEYS secret (comma-separated)"
-            IFS=',' read -ra API_KEYS <<< "$ONFINALITY_KEYS"
-          else
-            echo "Falling back to individual on1-on10 secrets"
-            for N in $(seq 1 10); do
-              VAR="ON${N}"
-              VAL="${!VAR}"
-              if [ -n "$VAL" ]; then
-                API_KEYS+=("$VAL")
-              fi
-            done
-          fi
+          for N in $(seq 1 50); do
+            VAR="ON${N}"
+            VAL="${!VAR}"
+            if [ -z "$VAL" ]; then
+              echo "  stopped at on${N} (not set)"
+              break
+            fi
+            API_KEYS+=("$VAL")
+            echo "  on${N}: ${VAL:0:8}..."
+          done
 
           N=${#API_KEYS[@]}
           echo ""
-          echo "  keys available: ${N}"
-          for i in "${!API_KEYS[@]}"; do
-            echo "  [$((i+1))] ${API_KEYS[$i]:0:8}..."
-          done
+          echo "  total: ${N} keys"
           echo ""
 
           echo "n=${N}" >> "$GITHUB_OUTPUT"
+          # Write keys as newline-separated for reliable passing
+          printf '%s\n' "${API_KEYS[@]}" > /tmp/keys.txt
 
       - name: Ping test
-        env:
-          ONFINALITY_KEYS: ${{ secrets.ONFINALITY_KEYS }}
-          ON1: ${{ secrets.on1 }}
-          ON2: ${{ secrets.on2 }}
-          ON3: ${{ secrets.on3 }}
-          ON4: ${{ secrets.on4 }}
-          ON5: ${{ secrets.on5 }}
-          ON6: ${{ secrets.on6 }}
-          ON7: ${{ secrets.on7 }}
-          ON8: ${{ secrets.on8 }}
-          ON9: ${{ secrets.on9 }}
-          ON10: ${{ secrets.on10 }}
         run: |
           set +e
           echo "==========================================="
@@ -72,25 +95,16 @@ jobs:
           echo ""
 
           BODY='{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}'
+          I=0
 
-          API_KEYS=()
-          if [ -n "$ONFINALITY_KEYS" ]; then
-            IFS=',' read -ra API_KEYS <<< "$ONFINALITY_KEYS"
-          else
-            for N in $(seq 1 10); do
-              VAR="ON${N}"
-              VAL="${!VAR}"
-              if [ -n "$VAL" ]; then API_KEYS+=("$VAL"); fi
-            done
-          fi
-
-          for i in "${!API_KEYS[@]}"; do
-            KEY="${API_KEYS[$i]}"
+          while IFS= read -r KEY; do
+            [ -z "$KEY" ] && continue
+            I=$((I + 1))
             URL="https://solana.api.onfinality.io/rpc?apikey=${KEY}"
             PREFIX="${KEY:0:8}"
             TOTAL=0
 
-            echo "--- key $((i+1)) (${PREFIX}...) ---"
+            echo "--- key ${I} (${PREFIX}...) ---"
             for j in 1 2 3 4 5; do
               RESP=$(curl -s -w "\n%{time_total}" --max-time 10 -X POST "$URL" \
                 -H "Content-Type: application/json" \
@@ -105,21 +119,9 @@ jobs:
             AVG=$((TOTAL / 5))
             echo "  average: ${AVG}ms"
             echo ""
-          done
+          done < /tmp/keys.txt
 
       - name: All keys parallel rate limit (getBlock)
-        env:
-          ONFINALITY_KEYS: ${{ secrets.ONFINALITY_KEYS }}
-          ON1: ${{ secrets.on1 }}
-          ON2: ${{ secrets.on2 }}
-          ON3: ${{ secrets.on3 }}
-          ON4: ${{ secrets.on4 }}
-          ON5: ${{ secrets.on5 }}
-          ON6: ${{ secrets.on6 }}
-          ON7: ${{ secrets.on7 }}
-          ON8: ${{ secrets.on8 }}
-          ON9: ${{ secrets.on9 }}
-          ON10: ${{ secrets.on10 }}
         run: |
           set +e
           echo "==========================================="
@@ -129,27 +131,18 @@ jobs:
           echo "  (all keys fresh — no prior load)"
           echo ""
 
-          API_KEYS=()
-          if [ -n "$ONFINALITY_KEYS" ]; then
-            IFS=',' read -ra API_KEYS <<< "$ONFINALITY_KEYS"
-          else
-            for N in $(seq 1 10); do
-              VAR="ON${N}"
-              VAL="${!VAR}"
-              if [ -n "$VAL" ]; then API_KEYS+=("$VAL"); fi
-            done
-          fi
-          N=${#API_KEYS[@]}
-          echo "  active keys: ${N}"
-          echo ""
-
+          N=${{ steps.detect.outputs.n }}
           SLOT=423000000
           BODY="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\",\"params\":[${SLOT},{\"encoding\":\"jsonParsed\",\"transactionDetails\":\"none\",\"rewards\":false,\"maxSupportedTransactionVersion\":0}]}"
 
           URLS=()
-          for KEY in "${API_KEYS[@]}"; do
+          while IFS= read -r KEY; do
+            [ -z "$KEY" ] && continue
             URLS+=("https://solana.api.onfinality.io/rpc?apikey=${KEY}")
-          done
+          done < /tmp/keys.txt
+          N=${#URLS[@]}
+          echo "  active keys: ${N}"
+          echo ""
 
           MAX_OK=0
 
