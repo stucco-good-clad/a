@@ -39,7 +39,7 @@ jobs:
           echo "n=${N}" >> "$GITHUB_OUTPUT"
           echo "keys=${KEYS}" >> "$GITHUB_OUTPUT"
 
-      - name: Get a recent slot number
+      - name: Get test slot
         id: get-slot
         env:
           ON1: ${{ secrets.on1 }}
@@ -48,13 +48,12 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}' \
             | jq -r '.result')
-          # Use slot 1000 behind current to ensure it's finalized
           TEST_SLOT=$((SLOT - 1000))
           echo "Current slot: ${SLOT}"
           echo "Test slot: ${TEST_SLOT}"
           echo "slot=${TEST_SLOT}" >> "$GITHUB_OUTPUT"
 
-      - name: Benchmark getBlock full (10 iterations, all keys)
+      - name: Benchmark 10 parallel getBlock full
         env:
           KEYS: ${{ steps.detect-of.outputs.keys }}
           SLOT: ${{ steps.get-slot.outputs.slot }}
@@ -64,53 +63,57 @@ jobs:
           IFS=',' read -ra KEY_ARRAY <<< "$KEYS"
           N=${#KEY_ARRAY[@]}
 
-          echo "=== getBlock full benchmark ==="
+          echo "=== 10 parallel getBlock full ==="
           echo "Slot: ${SLOT}"
           echo "Keys: ${N}"
-          echo "Each iteration: pick a random key, call getBlock full, measure wall-clock time"
           echo ""
 
-          TOTAL_MS=0
-          MIN_MS=999999
-          MAX_MS=0
+          # Get response size from first call
+          API_KEY="${KEY_ARRAY[0]}"
+          URL="https://solana.api.onfinality.io/rpc?apikey=${API_KEY}"
+          SIZE_BYTES=$(curl -s -X POST "$URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\",\"params\":[${SLOT},{\"encoding\":\"json\",\"transactionDetails\":\"full\",\"rewards\":false,\"maxSupportedTransactionVersion\":0}]}" \
+            | wc -c)
+          SIZE_MB=$(echo "scale=2; ${SIZE_BYTES} / 1048576" | bc)
+          echo "Response size: ${SIZE_MB} MB"
+          echo ""
+
+          # Fire 10 requests in parallel
+          START_NS=$(date +%s%N)
 
           for i in $(seq 1 10); do
-            KEY_IDX=$((RANDOM % N))
+            KEY_IDX=$(( (i - 1) % N ))
             API_KEY="${KEY_ARRAY[$KEY_IDX]}"
             URL="https://solana.api.onfinality.io/rpc?apikey=${API_KEY}"
+            OUT="/tmp/block_${i}.json"
 
-            START_NS=$(date +%s%N)
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            curl -s -o "$OUT" -w "req${i}: HTTP %{http_code}  %{time_total}s\n" \
               -X POST "$URL" \
               -H "Content-Type: application/json" \
-              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\",\"params\":[${SLOT},{\"encoding\":\"json\",\"transactionDetails\":\"full\",\"rewards\":false,\"maxSupportedTransactionVersion\":0}]}")
-            END_NS=$(date +%s%N)
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\",\"params\":[${SLOT},{\"encoding\":\"json\",\"transactionDetails\":\"full\",\"rewards\":false,\"maxSupportedTransactionVersion\":0}]" &
 
-            ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
-            TOTAL_MS=$((TOTAL_MS + ELAPSED_MS))
-
-            if [ "$ELAPSED_MS" -lt "$MIN_MS" ]; then MIN_MS=$ELAPSED_MS; fi
-            if [ "$ELAPSED_MS" -gt "$MAX_MS" ]; then MAX_MS=$ELAPSED_MS; fi
-
-            # Get response size for the first call only (to avoid re-downloading)
-            if [ "$i" -eq 1 ]; then
-              SIZE_BYTES=$(curl -s -X POST "$URL" \
-                -H "Content-Type: application/json" \
-                -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\",\"params\":[${SLOT},{\"encoding\":\"json\",\"transactionDetails\":\"full\",\"rewards\":false,\"maxSupportedTransactionVersion\":0}]}" \
-                | wc -c)
-              SIZE_MB=$(echo "scale=2; ${SIZE_BYTES} / 1048576" | bc)
-              echo "Response size: ${SIZE_MB} MB (${SIZE_BYTES} bytes)"
-              echo ""
-            fi
-
-            printf "  [%2d/10] key%d  HTTP %s  %d ms\n" "$i" "$((KEY_IDX + 1))" "$HTTP_CODE" "$ELAPSED_MS"
           done
 
-          AVG_MS=$((TOTAL_MS / 10))
+          wait
+
+          END_NS=$(date +%s%N)
+          TOTAL_MS=$(( (END_NS - START_NS) / 1000000 ))
+
           echo ""
-          echo "=== RESULTS ==="
-          echo "  Min:    ${MIN_MS} ms"
-          echo "  Max:    ${MAX_MS} ms"
-          echo "  Avg:    ${AVG_MS} ms"
-          echo "  Blocks/s (serial): $(echo "scale=2; 1000 / ${AVG_MS}" | bc)"
-          echo "  Theoretical 5-key parallel: $(echo "scale=2; 5000 / ${AVG_MS}" | bc) blocks/s"
+          echo "=== ALL 10 FINISHED ==="
+          echo "Wall-clock time (parallel): ${TOTAL_MS} ms"
+          echo "Theoretical per-block if serial: ${TOTAL_MS}0 ms"
+          echo ""
+
+          # Check all files have content
+          echo "Response sizes:"
+          for i in $(seq 1 10); do
+            if [ -f "/tmp/block_${i}.json" ]; then
+              FSIZE=$(wc -c < "/tmp/block_${i}.json")
+              FSIZE_MB=$(echo "scale=2; ${FSIZE} / 1048576" | bc)
+              printf "  block_%d: %s MB\n" "$i" "$FSIZE_MB"
+            else
+              printf "  block_%d: MISSING\n" "$i"
+            fi
+          done
