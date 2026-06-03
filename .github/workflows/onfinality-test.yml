@@ -9,12 +9,39 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Detect available keys
+        id: detect
+        run: |
+          set +e
+          KEYS=""
+          for N in 1 2 3 4 5 6 7 8 9 10; do
+            VAR="ON${N}"
+            VAL="${!VAR}"
+            if [ -n "$VAL" ]; then
+              if [ -n "$KEYS" ]; then KEYS="${KEYS} "; fi
+              KEYS="${KEYS}on${N}"
+              echo "  on${N}: ${VAL:0:8}..."
+            fi
+          done
+          N=$(echo "$KEYS" | wc -w)
+          echo ""
+          echo "  total: ${N} keys (${KEYS})"
+          echo "n=${N}" >> "$GITHUB_OUTPUT"
+          echo "keys=${KEYS}" >> "$GITHUB_OUTPUT"
+
       - name: Ping test
         env:
           ON1: ${{ secrets.on1 }}
           ON2: ${{ secrets.on2 }}
           ON3: ${{ secrets.on3 }}
           ON4: ${{ secrets.on4 }}
+          ON5: ${{ secrets.on5 }}
+          ON6: ${{ secrets.on6 }}
+          ON7: ${{ secrets.on7 }}
+          ON8: ${{ secrets.on8 }}
+          ON9: ${{ secrets.on9 }}
+          ON10: ${{ secrets.on10 }}
+          KEYS: ${{ steps.detect.outputs.keys }}
         run: |
           set +e
           echo "==========================================="
@@ -24,10 +51,9 @@ jobs:
 
           BODY='{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}'
 
-          for LABEL in on1 on2 on3 on4; do
+          for LABEL in $KEYS; do
             UPPER=$(echo "$LABEL" | tr '[:lower:]' '[:upper:]')
             KEY="${!UPPER}"
-            if [ -z "$KEY" ]; then echo "  ${LABEL}: NOT SET — skipping"; continue; fi
             URL="https://solana.api.onfinality.io/rpc?apikey=${KEY}"
             PREFIX="${KEY:0:8}"
             TOTAL=0
@@ -49,16 +75,24 @@ jobs:
             echo ""
           done
 
-      - name: 4 keys parallel rate limit (getBlock)
+      - name: All keys parallel rate limit (getBlock)
         env:
           ON1: ${{ secrets.on1 }}
           ON2: ${{ secrets.on2 }}
           ON3: ${{ secrets.on3 }}
           ON4: ${{ secrets.on4 }}
+          ON5: ${{ secrets.on5 }}
+          ON6: ${{ secrets.on6 }}
+          ON7: ${{ secrets.on7 }}
+          ON8: ${{ secrets.on8 }}
+          ON9: ${{ secrets.on9 }}
+          ON10: ${{ secrets.on10 }}
+          N: ${{ steps.detect.outputs.n }}
+          KEYS: ${{ steps.detect.outputs.keys }}
         run: |
           set +e
           echo "==========================================="
-          echo "  4 Keys Parallel Rate Limit — getBlock"
+          echo "  ${N} Keys Parallel Rate Limit — getBlock"
           echo "==========================================="
           echo ""
           echo "  (all keys fresh — no prior load)"
@@ -69,21 +103,19 @@ jobs:
 
           URLS=()
           LABELS=()
-          for LABEL in on1 on2 on3 on4; do
+          for LABEL in $KEYS; do
             UPPER=$(echo "$LABEL" | tr '[:lower:]' '[:upper:]')
             KEY="${!UPPER}"
-            if [ -n "$KEY" ]; then
-              URLS+=("https://solana.api.onfinality.io/rpc?apikey=${KEY}")
-              LABELS+=("$LABEL")
-            fi
+            URLS+=("https://solana.api.onfinality.io/rpc?apikey=${KEY}")
+            LABELS+=("$LABEL")
           done
-          N=${#URLS[@]}
-          echo "  keys available: ${N} (${LABELS[*]})"
+          echo "  active keys: ${#URLS[@]}"
           echo ""
 
           MAX_OK=0
+          N=${#URLS[@]}
 
-          for RPS in 10 20 30 40 50 60 80 100 120 150; do
+          for RPS in 10 20 30 40 50 60 80 100 120 150 200; do
             PER_KEY=$((RPS / N))
             REMAINING=$((RPS - PER_KEY * N))
             TMPDIR=$(mktemp -d)
@@ -118,59 +150,21 @@ jobs:
             fi
             sleep 2
           done
-          echo "  4-key ceiling: ~${MAX_OK} RPS"
           echo ""
-
-      - name: Cooldown (60s)
-        run: |
-          echo "Cooling down 60s before single-key test..."
-          sleep 60
-
-      - name: Single key rate limit (getBlock)
-        env:
-          ON1: ${{ secrets.on1 }}
-        run: |
-          set +e
-          echo "==========================================="
-          echo "  Single Key Rate Limit — getBlock (on1)"
-          echo "==========================================="
-          echo ""
-
-          SLOT=423000000
-          BODY="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\",\"params\":[${SLOT},{\"encoding\":\"jsonParsed\",\"transactionDetails\":\"none\",\"rewards\":false,\"maxSupportedTransactionVersion\":0}]}"
-          URL="https://solana.api.onfinality.io/rpc?apikey=${ON1}"
-          MAX_OK=0
-
-          for RPS in 5 10 15 20 25 30 40 50; do
-            TMPDIR=$(mktemp -d)
-            START_MS=$(date +%s%3N)
-            for i in $(seq 1 "$RPS"); do
-              curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
-                -X POST "$URL" \
-                -H "Content-Type: application/json" \
-                -d "$BODY" > "$TMPDIR/$i" &
-            done
-            wait
-            END_MS=$(date +%s%3N)
-            ELAPSED=$((END_MS - START_MS))
-            OK=$(grep -l "200" "$TMPDIR"/* 2>/dev/null | wc -l)
-            FAIL=$((RPS - OK))
-            rm -rf "$TMPDIR"
-
-            if [ "$FAIL" -eq 0 ]; then
-              echo "  ${RPS} RPS: ${OK}/${RPS} ok (${ELAPSED}ms wall)"
-              MAX_OK=$RPS
-            else
-              echo "  ${RPS} RPS: ${OK}/${RPS} ok, ${FAIL} fail -- BREAKS"
-              break
-            fi
-            sleep 2
-          done
-          echo "  single key ceiling: ~${MAX_OK} RPS"
+          echo "  ${N}-key ceiling: ~${MAX_OK} RPS"
+          echo "  effective per-key: ~$((MAX_OK / N)) RPS"
           echo ""
 
       - name: Summary
         run: |
+          N=${{ steps.detect.outputs.n }}
           echo "==========================================="
-          echo "  Done"
+          echo "  ${N} keys detected"
+          echo "  RU/day: $((N * 400000))"
+          echo "  RU for 1M blocks: 2000000"
+          if [ "$((N * 400000))" -ge 2000000 ]; then
+            echo "  1M blocks fits in daily quota: YES"
+          else
+            echo "  1M blocks fits in daily quota: NO (need $((2000000 - N * 400000)) more RU)"
+          fi
           echo "==========================================="
