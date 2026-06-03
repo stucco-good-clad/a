@@ -4,7 +4,9 @@ set -euo pipefail
 : "${SYMBOLS:?SYMBOLS is required}"
 : "${BINANCE_DOWNLOADER:?BINANCE_DOWNLOADER is required}"
 
+set +o pipefail
 FIRST=$(ls raw/*.txt | sort -n | head -1)
+set -o pipefail
 LAST=$(ls raw/*.txt | sort -n | tail -1)
 MIN_TIME=$(jq -r '.blockTime' "$FIRST")
 MAX_TIME=$(jq -r '.blockTime' "$LAST")
