@@ -16,7 +16,7 @@ const MAX_RETRY_ATTEMPTS: u32 = 3;
 const INITIAL_RETRY_DELAY_MS: u64 = 1000;
 
 struct RpcConfig {
-    url: String,
+    urls: Vec<String>,
     keys: Vec<String>,
     batch_size: usize,
 }
@@ -31,10 +31,12 @@ struct FetchStats {
     batch_err: AtomicU64,
     per_key_ok: Vec<AtomicU64>,
     per_key_err: Vec<AtomicU64>,
+    per_server_ok: Vec<AtomicU64>,
+    per_server_err: Vec<AtomicU64>,
 }
 
 impl FetchStats {
-    fn new(n_keys: usize) -> Self {
+    fn new(n_keys: usize, n_servers: usize) -> Self {
         Self {
             block_ok: AtomicU64::new(0),
             block_err: AtomicU64::new(0),
@@ -45,12 +47,21 @@ impl FetchStats {
             batch_err: AtomicU64::new(0),
             per_key_ok: (0..n_keys).map(|_| AtomicU64::new(0)).collect(),
             per_key_err: (0..n_keys).map(|_| AtomicU64::new(0)).collect(),
+            per_server_ok: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
+            per_server_err: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
         }
     }
 }
 
 fn load_config() -> Result<RpcConfig, Box<dyn std::error::Error>> {
-    let rpc_url = env::var("RPC_URL").unwrap_or_else(|_| DEFAULT_RPC_URL.to_string());
+    let mut urls: Vec<String> = Vec::new();
+    if let Ok(val) = env::var("RPC_URLS") {
+        urls = val.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    }
+    if urls.is_empty() {
+        let single = env::var("RPC_URL").unwrap_or_else(|_| DEFAULT_RPC_URL.to_string());
+        urls.push(single);
+    }
 
     let mut keys: Vec<String> = Vec::new();
     for n in 1.. {
@@ -68,8 +79,13 @@ fn load_config() -> Result<RpcConfig, Box<dyn std::error::Error>> {
         .parse()
         .unwrap_or(DEFAULT_BATCH_SIZE);
 
+    println!("RPC servers: {} (round-robin)", urls.len());
+    for (i, u) in urls.iter().enumerate() {
+        println!("  [{}] {}", i + 1, u);
+    }
+
     Ok(RpcConfig {
-        url: rpc_url,
+        urls,
         keys,
         batch_size,
     })
@@ -246,6 +262,7 @@ async fn fetch_batch_with_retry(
     slot_batch: Vec<u64>,
     stats: Arc<FetchStats>,
     key_idx: usize,
+    server_idx: usize,
 ) {
     let mut last_error = None;
 
@@ -255,6 +272,7 @@ async fn fetch_batch_with_retry(
                 if resp.status().is_success() {
                     stats.batch_ok.fetch_add(1, Ordering::Relaxed);
                     stats.per_key_ok[key_idx].fetch_add(1, Ordering::Relaxed);
+                    stats.per_server_ok[server_idx].fetch_add(1, Ordering::Relaxed);
 
                     match resp.json::<Value>().await {
                         Ok(results) => {
@@ -300,6 +318,7 @@ async fn fetch_batch_with_retry(
                             eprintln!("Warning: failed to parse batch response: {}", e);
                             stats.batch_err.fetch_add(1, Ordering::Relaxed);
                             stats.per_key_err[key_idx].fetch_add(1, Ordering::Relaxed);
+                            stats.per_server_err[server_idx].fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     return;
@@ -327,12 +346,14 @@ async fn fetch_batch_with_retry(
     );
     stats.batch_err.fetch_add(1, Ordering::Relaxed);
     stats.per_key_err[key_idx].fetch_add(1, Ordering::Relaxed);
+    stats.per_server_err[server_idx].fetch_add(1, Ordering::Relaxed);
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config()?;
     let n_keys = config.keys.len();
+    let n_servers = config.urls.len();
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
@@ -358,7 +379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok()
             .and_then(|s| s.parse::<u64>().ok());
 
-        discover_slots(&client, &config.url, &config.keys[0], num_blocks, range_start, range_end).await?
+        discover_slots(&client, &config.urls[0], &config.keys[0], num_blocks, range_start, range_end).await?
     };
 
     if slots.is_empty() {
@@ -377,25 +398,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write("range.txt", format!("{}-{}", first_slot, last_slot))?;
 
     println!(
-        "Fetching {} blocks (slots {}-{}), {} per batch, {} keys",
-        actual, first_slot, last_slot, config.batch_size, n_keys
+        "Fetching {} blocks (slots {}-{}), {} per batch, {} keys, {} servers",
+        actual, first_slot, last_slot, config.batch_size, n_keys, config.urls.len()
     );
 
     let batches: Vec<Vec<u64>> = slots.chunks(config.batch_size).map(|c| c.to_vec()).collect();
     let total_batches = batches.len();
     println!("Total batches: {}", total_batches);
 
+    let max_concurrent: usize = env::var("MAX_CONCURRENT")
+        .unwrap_or_else(|_| MAX_CONCURRENT_REQUESTS.to_string())
+        .parse()
+        .unwrap_or(MAX_CONCURRENT_REQUESTS);
+
     let total_start = Instant::now();
-    let stats = Arc::new(FetchStats::new(n_keys));
-    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
+    let stats = Arc::new(FetchStats::new(n_keys, n_servers));
+    let semaphore = Arc::new(Semaphore::new(max_concurrent));
     let keys = Arc::new(config.keys);
+    let urls = Arc::new(config.urls);
 
     let mut handles = Vec::with_capacity(total_batches);
 
     for (batch_idx, slot_batch) in batches.into_iter().enumerate() {
         let client = client.clone();
-        let rpc_url = config.url.clone();
         let keys = Arc::clone(&keys);
+        let urls = Arc::clone(&urls);
         let stats = Arc::clone(&stats);
         let semaphore = Arc::clone(&semaphore);
 
@@ -403,7 +430,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _permit = semaphore.acquire().await.expect("semaphore closed");
 
             let key_idx = batch_idx % keys.len();
-            let url = format!("{}?api_key={}", rpc_url.trim_end_matches('/'), keys[key_idx]);
+            let server_idx = batch_idx % urls.len();
+            let url = format!("{}?api_key={}", urls[server_idx], keys[key_idx]);
 
             let mut batch_reqs = Vec::with_capacity(slot_batch.len());
             for (i, &slot) in slot_batch.iter().enumerate() {
@@ -423,7 +451,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }));
             }
 
-            fetch_batch_with_retry(client, url, batch_reqs, slot_batch, stats, key_idx).await;
+            fetch_batch_with_retry(client, url, batch_reqs, slot_batch, stats, key_idx, server_idx).await;
         });
         handles.push(handle);
     }
@@ -458,6 +486,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if dur_s > 0.0 {
         println!("  Blocks/s:     {:.0}", total_ok as f64 / dur_s);
+    }
+    println!();
+    println!("  Per-server batch distribution:");
+    for idx in 0..n_servers {
+        let ok = stats.per_server_ok[idx].load(Ordering::Relaxed);
+        let err = stats.per_server_err[idx].load(Ordering::Relaxed);
+        println!("    {}: {} batches ok, {} err", urls[idx], ok, err);
     }
     println!();
     println!("  Per-key batch distribution:");
