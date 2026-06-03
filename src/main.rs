@@ -5,10 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tokio::sync::Semaphore;
 
 const DEFAULT_NUM_BLOCKS: usize = 1000;
-const MAX_CONCURRENT_REQUESTS: usize = 40;
+const RPS_PER_KEY: u64 = 10;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_RETRY_ATTEMPTS: u32 = 3;
 const INITIAL_RETRY_DELAY_MS: u64 = 1000;
@@ -63,7 +62,7 @@ fn load_config() -> Result<RpcConfig, Box<dyn std::error::Error>> {
     }
 
     println!("RPC URL: {}", url);
-    println!("Keys: {} (round-robin, ~10 RPS each)", keys.len());
+    println!("Keys: {} (round-robin, {} RPS each)", keys.len(), RPS_PER_KEY);
 
     Ok(RpcConfig { url, keys })
 }
@@ -232,10 +231,10 @@ fn write_block(slot: u64, block: &Value, stats: &FetchStats) {
 }
 
 async fn fetch_block_with_retry(
-    client: reqwest::Client,
-    url: String,
+    client: &reqwest::Client,
+    url: &str,
     slot: u64,
-    stats: Arc<FetchStats>,
+    stats: &FetchStats,
     key_idx: usize,
 ) {
     let body = json!({
@@ -256,7 +255,7 @@ async fn fetch_block_with_retry(
     let mut last_error = None;
 
     for attempt in 0..MAX_RETRY_ATTEMPTS {
-        match client.post(&url).json(&body).send().await {
+        match client.post(url).json(&body).send().await {
             Ok(resp) => {
                 if resp.status().is_success() {
                     stats.req_ok.fetch_add(1, Ordering::Relaxed);
@@ -283,7 +282,7 @@ async fn fetch_block_with_retry(
                                                 .block_filtered
                                                 .fetch_add(1, Ordering::Relaxed);
                                         }
-                                        write_block(slot, &filtered, &stats);
+                                        write_block(slot, &filtered, stats);
                                     }
                                 } else if block.is_null() {
                                     stats.block_err.fetch_add(1, Ordering::Relaxed);
@@ -293,7 +292,7 @@ async fn fetch_block_with_retry(
                             }
                         }
                         Err(e) => {
-                            eprintln!("Warning: failed to parse response for slot {}: {}", slot, e);
+                            eprintln!("Warning: parse error slot {}: {}", slot, e);
                             stats.req_err.fetch_add(1, Ordering::Relaxed);
                             stats.per_key_err[key_idx].fetch_add(1, Ordering::Relaxed);
                         }
@@ -318,10 +317,36 @@ async fn fetch_block_with_retry(
         "Error: slot {} failed after {} attempts: {}",
         slot,
         MAX_RETRY_ATTEMPTS,
-        last_error.unwrap_or_else(|| "unknown error".to_string())
+        last_error.unwrap_or_else(|| "unknown".to_string())
     );
     stats.req_err.fetch_add(1, Ordering::Relaxed);
     stats.per_key_err[key_idx].fetch_add(1, Ordering::Relaxed);
+}
+
+async fn run_key_worker(
+    key_idx: usize,
+    api_key: String,
+    rpc_url: String,
+    slots: Vec<u64>,
+    client: reqwest::Client,
+    stats: Arc<FetchStats>,
+) {
+    let url = format!("{}?apikey={}", rpc_url, api_key);
+    let interval = Duration::from_millis(1000 / RPS_PER_KEY);
+    let total = slots.len();
+
+    for (i, slot) in slots.into_iter().enumerate() {
+        let start = Instant::now();
+
+        fetch_block_with_retry(&client, &url, slot, &stats, key_idx).await;
+
+        if i < total - 1 {
+            let elapsed = start.elapsed();
+            if elapsed < interval {
+                tokio::time::sleep(interval - elapsed).await;
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -369,47 +394,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     fs::write("range.txt", format!("{}-{}", first_slot, last_slot))?;
 
+    let total_rps = n_keys as u64 * RPS_PER_KEY;
+    let est_secs = actual as f64 / total_rps as f64;
     println!(
-        "Fetching {} blocks (slots {}-{}), {} keys, individual requests",
-        actual, first_slot, last_slot, n_keys
+        "Fetching {} blocks, {} keys × {} RPS = {} RPS total (~{:.0}s)",
+        actual, n_keys, RPS_PER_KEY, total_rps, est_secs
     );
-
-    let max_concurrent: usize = env::var("MAX_CONCURRENT")
-        .unwrap_or_else(|_| MAX_CONCURRENT_REQUESTS.to_string())
-        .parse()
-        .unwrap_or(MAX_CONCURRENT_REQUESTS);
 
     let total_start = Instant::now();
     let stats = Arc::new(FetchStats::new(n_keys));
-    let semaphore = Arc::new(Semaphore::new(max_concurrent));
-    let keys = Arc::new(config.keys);
-    let rpc_url = Arc::new(config.url);
 
-    let mut handles = Vec::with_capacity(actual);
+    // Split slots across keys round-robin
+    let mut key_slots: Vec<Vec<u64>> = (0..n_keys).map(|_| Vec::new()).collect();
+    for (i, &slot) in slots.iter().enumerate() {
+        key_slots[i % n_keys].push(slot);
+    }
 
-    for (slot_idx, &slot) in slots.iter().enumerate() {
+    // Spawn one worker per key, each with its own rate limiter
+    let mut handles = Vec::with_capacity(n_keys);
+    for (key_idx, api_key) in config.keys.into_iter().enumerate() {
         let client = client.clone();
-        let keys = Arc::clone(&keys);
-        let rpc_url = Arc::clone(&rpc_url);
         let stats = Arc::clone(&stats);
-        let semaphore = Arc::clone(&semaphore);
+        let rpc_url = config.url.clone();
+        let my_slots = std::mem::take(&mut key_slots[key_idx]);
 
-        let handle = tokio::spawn(async move {
-            let _permit = semaphore.acquire().await.expect("semaphore closed");
-
-            let key_idx = slot_idx % keys.len();
-            let url = format!("{}?apikey={}", rpc_url, keys[key_idx]);
-
-            fetch_block_with_retry(client, url, slot, stats, key_idx).await;
-        });
-        handles.push(handle);
+        handles.push(tokio::spawn(async move {
+            run_key_worker(key_idx, api_key, rpc_url, my_slots, client, stats).await;
+        }));
     }
 
     for h in handles {
-        match h.await {
-            Ok(_) => {}
-            Err(e) => eprintln!("Warning: task panicked: {}", e),
-        }
+        let _ = h.await;
     }
 
     let total_elapsed = total_start.elapsed();
