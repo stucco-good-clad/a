@@ -334,11 +334,24 @@ async fn run_key_worker(
     let url = format!("{}?apikey={}", rpc_url, api_key);
     let interval = Duration::from_millis(1000 / RPS_PER_KEY);
     let total = slots.len();
+    let worker_start = Instant::now();
+    let log_every = 25;
 
     for (i, slot) in slots.into_iter().enumerate() {
         let start = Instant::now();
 
         fetch_block_with_retry(&client, &url, slot, &stats, key_idx).await;
+
+        if (i + 1) % log_every == 0 || i == total - 1 {
+            let elapsed = worker_start.elapsed().as_secs_f64();
+            let ok = stats.block_ok.load(Ordering::Relaxed);
+            let err = stats.block_err.load(Ordering::Relaxed);
+            let rps = if elapsed > 0.0 { ok as f64 / elapsed } else { 0.0 };
+            eprintln!(
+                "[{:.0}s] key{}: {}/{} blocks ({:.0} blocks/s) total_saved={} err={}",
+                elapsed, key_idx + 1, i + 1, total, rps, ok, err
+            );
+        }
 
         if i < total - 1 {
             let elapsed = start.elapsed();
@@ -411,6 +424,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Spawn one worker per key, each with its own rate limiter
+    let global_start = Instant::now();
+    eprintln!("[0s] Starting {} workers, {} blocks each, {} RPS per key", n_keys, slots.len() / n_keys, RPS_PER_KEY);
     let mut handles = Vec::with_capacity(n_keys);
     for (key_idx, api_key) in config.keys.into_iter().enumerate() {
         let client = client.clone();
@@ -434,19 +449,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let r_err = stats.req_err.load(Ordering::Relaxed);
     let dur_s = total_elapsed.as_secs_f64();
 
-    println!();
-    println!("=== Results ===");
-    println!("  Duration:     {:.2}s", dur_s);
-    println!("  Requests ok:  {} ({} err)", r_ok, r_err);
-    println!("  Blocks saved: {}", total_ok);
-    println!("  Blocks err:   {}", total_err);
+    eprintln!();
+    eprintln!("[{:.0}s] === FETCH COMPLETE ===", dur_s);
+    eprintln!("  Duration:     {:.2}s", dur_s);
+    eprintln!("  Requests ok:  {} ({} err)", r_ok, r_err);
+    eprintln!("  Blocks saved: {}", total_ok);
+    eprintln!("  Blocks err:   {}", total_err);
     let total_filtered = stats.block_filtered.load(Ordering::Relaxed);
     let total_tx = stats.tx_total.load(Ordering::Relaxed);
     let total_kept = stats.tx_kept.load(Ordering::Relaxed);
     let tx_dropped = total_tx - total_kept;
     if total_filtered > 0 {
-        println!("  Blocks with filtered txs: {}", total_filtered);
-        println!("  Transactions: {} total, {} kept, {} dropped (null inner)", total_tx, total_kept, tx_dropped);
+        eprintln!("  Blocks with filtered txs: {}", total_filtered);
+        eprintln!("  Transactions: {} total, {} kept, {} dropped (null inner)", total_tx, total_kept, tx_dropped);
+    }
+    if dur_s > 0.0 {
+        eprintln!("  Blocks/s:     {:.0}", total_ok as f64 / dur_s);
+    }
+    eprintln!();
+    eprintln!("  Per-key distribution:");
+    for idx in 0..n_keys {
+        let ok = stats.per_key_ok[idx].load(Ordering::Relaxed);
+        let err = stats.per_key_err[idx].load(Ordering::Relaxed);
+        eprintln!("    key{}: {} ok, {} err", idx + 1, ok, err);
     }
     if dur_s > 0.0 {
         println!("  Blocks/s:     {:.0}", total_ok as f64 / dur_s);
