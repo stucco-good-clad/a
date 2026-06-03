@@ -1,0 +1,81 @@
+name: "TEST: Faithful HTTP (No Local Indexes)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      epoch:
+        description: "Epoch to test"
+        required: false
+        default: "979"
+
+permissions:
+  contents: read
+
+jobs:
+  test-http:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: System info
+        run: |
+          echo "============================================"
+          echo "  SYSTEM INFORMATION"
+          echo "============================================"
+          echo "CPU: $(nproc) cores"
+          echo "RAM: $(free -h | awk '/Mem:/ {print $2}')"
+          echo "Disk: $(df -h / | awk 'NR==2 {print $2}')"
+          echo "OS: $(uname -sr)"
+          echo "IP: $(curl -sf --max-time 5 ifconfig.me || echo 'unknown')"
+          echo "============================================"
+          echo ""
+
+      - name: Start faithful-cli (HTTP indexes)
+        env:
+          EPOCH: ${{ github.event.inputs.epoch || '979' }}
+        run: |
+          chmod +x scripts/start-faithful-http.sh
+          bash scripts/start-faithful-http.sh
+
+      - name: Wait for epoch to load
+        run: |
+          echo "Waiting for faithful-cli to load epoch from HTTP..."
+          for i in $(seq 1 120); do
+            RESULT=$(curl -sf --max-time 10 -X POST http://localhost:8899 \
+              -H "Content-Type: application/json" \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getSlot"}' 2>/dev/null) || RESULT='{"error":"not ready"}'
+            SLOT=$(echo "$RESULT" | jq -r '.result // empty' 2>/dev/null)
+            if [ -n "$SLOT" ] && [ "$SLOT" != "0" ]; then
+              echo "  Epoch loaded! Current slot: $SLOT (waited ${i}s)"
+              break
+            fi
+            if [ $((i % 10)) -eq 0 ]; then
+              echo "  Still loading... (${i}s elapsed)"
+            fi
+            sleep 1
+          done
+
+      - name: Run benchmark suite
+        env:
+          EPOCH: ${{ github.event.inputs.epoch || '979' }}
+        run: |
+          chmod +x scripts/test-faithful.sh
+          bash scripts/test-faithful.sh
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/faithful.pid" ]; then
+            PID=$(cat "$RUNNER_TEMP/faithful.pid")
+            echo "Stopping faithful-cli (PID: $PID)..."
+            kill "$PID" 2>/dev/null || true
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: faithful-http-${{ github.event.inputs.epoch || '979' }}
+          path: ${{ runner.temp }}/test-results/
+          retention-days: 30

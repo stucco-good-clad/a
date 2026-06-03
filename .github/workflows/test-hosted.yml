@@ -1,0 +1,63 @@
+name: "TEST: Faithful Hosted (Local Indexes)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      epoch:
+        description: "Epoch to test"
+        required: false
+        default: "979"
+
+permissions:
+  contents: read
+
+jobs:
+  test-hosted:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: System info
+        run: |
+          echo "============================================"
+          echo "  SYSTEM INFORMATION"
+          echo "============================================"
+          echo "CPU: $(nproc) cores"
+          echo "RAM: $(free -h | awk '/Mem:/ {print $2}')"
+          echo "Disk: $(df -h / | awk 'NR==2 {print $2}')"
+          echo "OS: $(uname -sr)"
+          echo "IP: $(curl -sf --max-time 5 ifconfig.me || echo 'unknown')"
+          echo "============================================"
+          echo ""
+
+      - name: Start faithful-cli (hosted indexes)
+        env:
+          EPOCH: ${{ github.event.inputs.epoch || '979' }}
+        run: |
+          chmod +x scripts/start-faithful-hosted.sh
+          bash scripts/start-faithful-hosted.sh
+
+      - name: Run benchmark suite
+        env:
+          EPOCH: ${{ github.event.inputs.epoch || '979' }}
+        run: |
+          chmod +x scripts/test-faithful.sh
+          bash scripts/test-faithful.sh
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/faithful.pid" ]; then
+            PID=$(cat "$RUNNER_TEMP/faithful.pid")
+            echo "Stopping faithful-cli (PID: $PID)..."
+            kill "$PID" 2>/dev/null || true
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: faithful-hosted-${{ github.event.inputs.epoch || '979' }}
+          path: ${{ runner.temp }}/test-results/
+          retention-days: 30
