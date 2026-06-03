@@ -25,7 +25,8 @@ jobs:
           BODY='{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}'
 
           for LABEL in on1 on2 on3 on4; do
-            eval "KEY=\$$LABEL"
+            UPPER=$(echo "$LABEL" | tr '[:lower:]' '[:upper:]')
+            KEY="${!UPPER}"
             if [ -z "$KEY" ]; then echo "  ${LABEL}: NOT SET — skipping"; continue; fi
             URL="https://solana.api.onfinality.io/rpc?apikey=${KEY}"
             PREFIX="${KEY:0:8}"
@@ -109,7 +110,8 @@ jobs:
           URLS=()
           LABELS=()
           for LABEL in on1 on2 on3 on4; do
-            eval "KEY=\$$LABEL"
+            UPPER=$(echo "$LABEL" | tr '[:lower:]' '[:upper:]')
+            KEY="${!UPPER}"
             if [ -n "$KEY" ]; then
               URLS+=("https://solana.api.onfinality.io/rpc?apikey=${KEY}")
               LABELS+=("$LABEL")
@@ -126,7 +128,6 @@ jobs:
             REMAINING=$((RPS - PER_KEY * N))
             TMPDIR=$(mktemp -d)
             START_MS=$(date +%s%3N)
-            IDX=0
 
             for k in $(seq 0 $((N - 1))); do
               COUNT=$PER_KEY
@@ -138,7 +139,6 @@ jobs:
                   -X POST "${URLS[$k]}" \
                   -H "Content-Type: application/json" \
                   -d "$BODY" > "$TMPDIR/${LABELS[$k]}_${i}" &
-                IDX=$((IDX + 1))
               done
             done
             wait
@@ -156,6 +156,7 @@ jobs:
               echo "  ${RPS} RPS (${PER_KEY}/key + ${REMAINING} extra): ${OK}/${RPS} ok, ${FAIL} fail -- BREAKS"
               break
             fi
+            sleep 2
           done
           echo "  4-key ceiling: ~${MAX_OK} RPS"
           echo ""
