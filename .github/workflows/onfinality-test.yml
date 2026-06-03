@@ -14,6 +14,7 @@ jobs:
           ON1: ${{ secrets.on1 }}
           ON2: ${{ secrets.on2 }}
         run: |
+          set +e
           echo "==========================================="
           echo "  OnFinality Key Ping Test"
           echo "==========================================="
@@ -21,15 +22,15 @@ jobs:
 
           BODY='{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}'
 
-          ping_key() {
-            local label=$1
-            local key=$2
-            local url="https://solana.api.onfinality.io/rpc?apikey=${key}"
-            local total=0
+          for LABEL in on1 on2; do
+            if [ "$LABEL" = "on1" ]; then KEY="$ON1"; else KEY="$ON2"; fi
+            URL="https://solana.api.onfinality.io/rpc?apikey=${KEY}"
+            PREFIX="${KEY:0:8}"
+            TOTAL=0
 
-            echo "--- ${label} (${key:0:8}...) ---"
+            echo "--- ${LABEL} (${PREFIX}...) ---"
             for i in 1 2 3 4 5; do
-              RESP=$(curl -s -w "\n%{time_total}" --max-time 10 -X POST "$url" \
+              RESP=$(curl -s -w "\n%{time_total}" --max-time 10 -X POST "$URL" \
                 -H "Content-Type: application/json" \
                 -d "$BODY")
               BODY_R=$(echo "$RESP" | head -n -1)
@@ -37,20 +38,19 @@ jobs:
               MS=$(echo "$TIME" | awk '{printf "%.0f", $1 * 1000}')
               SLOT=$(echo "$BODY_R" | jq -r '.result // "error"' 2>/dev/null || echo "error")
               echo "  ping $i: ${MS}ms (slot ${SLOT})"
-              total=$((total + MS))
+              TOTAL=$((TOTAL + MS))
             done
-            echo "  average: $((total / 5))ms"
+            AVG=$((TOTAL / 5))
+            echo "  average: ${AVG}ms"
             echo ""
-          }
-
-          ping_key "on1" "$ON1"
-          ping_key "on2" "$ON2"
+          done
 
       - name: Rate limit test
         env:
           ON1: ${{ secrets.on1 }}
           ON2: ${{ secrets.on2 }}
         run: |
+          set +e
           echo "==========================================="
           echo "  OnFinality Rate Limit Test"
           echo "==========================================="
@@ -58,56 +58,44 @@ jobs:
 
           BODY='{"jsonrpc":"2.0","id":1,"method":"getFirstAvailableBlock","params":[]}'
 
-          test_rps() {
-            local url=$1
-            local rps=$2
-            local tmpdir=$(mktemp -d)
-            for i in $(seq 1 $rps); do
-              curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-                -X POST "$url" \
-                -H "Content-Type: application/json" \
-                -d "$BODY" > "$tmpdir/$i" &
-            done
-            wait
-            local ok=$(grep -l "200" "$tmpdir"/* 2>/dev/null | wc -l)
-            local fail=$((rps - ok))
-            rm -rf "$tmpdir"
-            echo "$ok $fail"
-          }
+          for LABEL in on1 on2; do
+            if [ "$LABEL" = "on1" ]; then KEY="$ON1"; else KEY="$ON2"; fi
+            URL="https://solana.api.onfinality.io/rpc?apikey=${KEY}"
+            PREFIX="${KEY:0:8}"
+            MAX_OK=0
+            BREAK_RPS=0
 
-          bench_key() {
-            local label=$1
-            local key=$2
-            local url="https://solana.api.onfinality.io/rpc?apikey=${key}"
-            local max_ok=0
-            local break_rps=0
-
-            echo "--- ${label} (${key:0:8}...) ---"
-            for rps in 10 20 30 40 50 60 70 80 90 100 120 150 200; do
-              RESULT=$(test_rps "$url" "$rps)
-              OK=$(echo "$RESULT" | awk '{print $1}')
-              FAIL=$(echo "$RESULT" | awk '{print $2}')
+            echo "--- ${LABEL} (${PREFIX}...) ---"
+            for RPS in 10 20 30 40 50 60 70 80 90 100 120 150 200; do
+              TMPDIR=$(mktemp -d)
+              for i in $(seq 1 "$RPS"); do
+                curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+                  -X POST "$URL" \
+                  -H "Content-Type: application/json" \
+                  -d "$BODY" > "$TMPDIR/$i" &
+              done
+              wait
+              OK=$(grep -l "200" "$TMPDIR"/* 2>/dev/null | wc -l)
+              FAIL=$((RPS - OK))
+              rm -rf "$TMPDIR"
 
               if [ "$FAIL" -eq 0 ]; then
-                echo "  ${rps} RPS: ${OK}/${rps} ok"
-                max_ok=$rps
+                echo "  ${RPS} RPS: ${OK}/${RPS} ok"
+                MAX_OK=$RPS
               else
-                echo "  ${rps} RPS: ${OK}/${rps} ok, ${FAIL} fail ← BREAKS HERE"
-                break_rps=$rps
+                echo "  ${RPS} RPS: ${OK}/${RPS} ok, ${FAIL} fail -- BREAKS HERE"
+                BREAK_RPS=$RPS
                 break
               fi
             done
 
-            if [ "$break_rps" -eq 0 ]; then
-              echo "  ceiling: ${max_ok}+ RPS (didn't break)"
+            if [ "$BREAK_RPS" -eq 0 ]; then
+              echo "  ceiling: ${MAX_OK}+ RPS (did not break)"
             else
-              echo "  ceiling: ~${max_ok} RPS"
+              echo "  ceiling: ~${MAX_OK} RPS"
             fi
             echo ""
-          }
-
-          bench_key "on1" "$ON1"
-          bench_key "on2" "$ON2"
+          done
 
           echo "==========================================="
           echo "  Done"
