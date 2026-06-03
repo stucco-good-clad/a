@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
 const DEFAULT_RPC_URL: &str = "http://slc.rpc.orbitflare.com";
-const DEFAULT_BATCH_SIZE: usize = 10;
+const DEFAULT_BATCH_SIZE: usize = 20;
 const DEFAULT_NUM_BLOCKS: usize = 1000;
 const MAX_CONCURRENT_REQUESTS: usize = 20;
 const REQUEST_TIMEOUT_SECS: u64 = 30;

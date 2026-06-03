@@ -48,16 +48,7 @@ jobs:
       - name: Fetch raw blocks
         env:
           KEY_1: ${{ secrets.KEY_1 }}
-          KEY_2: ${{ secrets.KEY_2 }}
-          KEY_3: ${{ secrets.KEY_3 }}
-          KEY_4: ${{ secrets.KEY_4 }}
-          KEY_5: ${{ secrets.KEY_5 }}
-          KEY_6: ${{ secrets.KEY_6 }}
-          KEY_7: ${{ secrets.KEY_7 }}
-          KEY_8: ${{ secrets.KEY_8 }}
-          KEY_9: ${{ secrets.KEY_9 }}
-          KEY_10: ${{ secrets.KEY_10 }}
-          RPC_URLS: ${{ steps.select-rpc.outputs.rpc_urls }}
+          RPC_URL: ${{ steps.select-rpc.outputs.rpc_url }}
         run: |
           set -euo pipefail
           rm -rf raw
