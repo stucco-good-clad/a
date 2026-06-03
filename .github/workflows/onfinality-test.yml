@@ -1,0 +1,114 @@
+name: onfinality-test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Ping test
+        env:
+          ON1: ${{ secrets.on1 }}
+          ON2: ${{ secrets.on2 }}
+        run: |
+          echo "==========================================="
+          echo "  OnFinality Key Ping Test"
+          echo "==========================================="
+          echo ""
+
+          BODY='{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}'
+
+          ping_key() {
+            local label=$1
+            local key=$2
+            local url="https://solana.api.onfinality.io/rpc?apikey=${key}"
+            local total=0
+
+            echo "--- ${label} (${key:0:8}...) ---"
+            for i in 1 2 3 4 5; do
+              RESP=$(curl -s -w "\n%{time_total}" --max-time 10 -X POST "$url" \
+                -H "Content-Type: application/json" \
+                -d "$BODY")
+              BODY_R=$(echo "$RESP" | head -n -1)
+              TIME=$(echo "$RESP" | tail -n 1)
+              MS=$(echo "$TIME" | awk '{printf "%.0f", $1 * 1000}')
+              SLOT=$(echo "$BODY_R" | jq -r '.result // "error"' 2>/dev/null || echo "error")
+              echo "  ping $i: ${MS}ms (slot ${SLOT})"
+              total=$((total + MS))
+            done
+            echo "  average: $((total / 5))ms"
+            echo ""
+          }
+
+          ping_key "on1" "$ON1"
+          ping_key "on2" "$ON2"
+
+      - name: Rate limit test
+        env:
+          ON1: ${{ secrets.on1 }}
+          ON2: ${{ secrets.on2 }}
+        run: |
+          echo "==========================================="
+          echo "  OnFinality Rate Limit Test"
+          echo "==========================================="
+          echo ""
+
+          BODY='{"jsonrpc":"2.0","id":1,"method":"getFirstAvailableBlock","params":[]}'
+
+          test_rps() {
+            local url=$1
+            local rps=$2
+            local tmpdir=$(mktemp -d)
+            for i in $(seq 1 $rps); do
+              curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+                -X POST "$url" \
+                -H "Content-Type: application/json" \
+                -d "$BODY" > "$tmpdir/$i" &
+            done
+            wait
+            local ok=$(grep -l "200" "$tmpdir"/* 2>/dev/null | wc -l)
+            local fail=$((rps - ok))
+            rm -rf "$tmpdir"
+            echo "$ok $fail"
+          }
+
+          bench_key() {
+            local label=$1
+            local key=$2
+            local url="https://solana.api.onfinality.io/rpc?apikey=${key}"
+            local max_ok=0
+            local break_rps=0
+
+            echo "--- ${label} (${key:0:8}...) ---"
+            for rps in 10 20 30 40 50 60 70 80 90 100 120 150 200; do
+              RESULT=$(test_rps "$url" "$rps)
+              OK=$(echo "$RESULT" | awk '{print $1}')
+              FAIL=$(echo "$RESULT" | awk '{print $2}')
+
+              if [ "$FAIL" -eq 0 ]; then
+                echo "  ${rps} RPS: ${OK}/${rps} ok"
+                max_ok=$rps
+              else
+                echo "  ${rps} RPS: ${OK}/${rps} ok, ${FAIL} fail ← BREAKS HERE"
+                break_rps=$rps
+                break
+              fi
+            done
+
+            if [ "$break_rps" -eq 0 ]; then
+              echo "  ceiling: ${max_ok}+ RPS (didn't break)"
+            else
+              echo "  ceiling: ~${max_ok} RPS"
+            fi
+            echo ""
+          }
+
+          bench_key "on1" "$ON1"
+          bench_key "on2" "$ON2"
+
+          echo "==========================================="
+          echo "  Done"
+          echo "==========================================="
