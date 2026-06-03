@@ -91,7 +91,7 @@ jobs:
             curl -s -o "$OUT" -w "req${i}: HTTP %{http_code}  %{time_total}s\n" \
               -X POST "$URL" \
               -H "Content-Type: application/json" \
-              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\",\"params\":[${SLOT},{\"encoding\":\"json\",\"transactionDetails\":\"full\",\"rewards\":false,\"maxSupportedTransactionVersion\":0}]" &
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBlock\",\"params\":[${SLOT},{\"encoding\":\"json\",\"transactionDetails\":\"full\",\"rewards\":false,\"maxSupportedTransactionVersion\":0}]}" &
 
           done
 
