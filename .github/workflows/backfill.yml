@@ -18,11 +18,43 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Select best RPC endpoint
+      - name: Select best Orbitflare endpoint
         id: select-rpc
         env:
           KEY_1: ${{ secrets.KEY_1 }}
         run: bash scripts/select-rpc.sh
+
+      - name: Detect OnFinality keys
+        id: detect-of
+        env:
+          ON1: ${{ secrets.on1 }}
+          ON2: ${{ secrets.on2 }}
+          ON3: ${{ secrets.on3 }}
+          ON4: ${{ secrets.on4 }}
+        run: |
+          set +e
+          KEYS=""
+          URLS=""
+          for N in 1 2 3 4; do
+            VAR="ON${N}"
+            VAL="${!VAR}"
+            if [ -n "$VAL" ]; then
+              if [ -n "$KEYS" ]; then KEYS="${KEYS},"; URLS="${URLS},"; fi
+              KEYS="${KEYS}${VAL}"
+              URLS="${URLS}https://solana.api.onfinality.io/rpc"
+              echo "  on${N}: ${VAL:0:8}..."
+            fi
+          done
+          N=$(echo "$KEYS" | tr ',' '\n' | wc -l)
+          if [ "$N" -eq 0 ] || [ -z "$KEYS" ]; then
+            N=0
+            echo "  none found"
+          fi
+          echo ""
+          echo "  total: ${N} OnFinality keys"
+          echo "n=${N}" >> "$GITHUB_OUTPUT"
+          echo "urls=${URLS}" >> "$GITHUB_OUTPUT"
+          echo "keys=${KEYS}" >> "$GITHUB_OUTPUT"
 
       - name: Determine window
         id: window
@@ -49,11 +81,28 @@ jobs:
         env:
           KEY_1: ${{ secrets.KEY_1 }}
           RPC_URL: ${{ steps.select-rpc.outputs.rpc_url }}
+          RPC_URLS: ${{ steps.detect-of.outputs.urls }}
+          ONFINALITY_KEYS: ${{ steps.detect-of.outputs.keys }}
+          API_KEY_PARAM: "apikey"
         run: |
           set -euo pipefail
           rm -rf raw
           mkdir -p raw
-          ./target/release/batch-blocks --slots-file slots.txt
+
+          N=${{ steps.detect-of.outputs.n }}
+          if [ "$N" -gt 0 ]; then
+            echo "Using ${N} OnFinality keys (parallel)"
+            # Pass OnFinality keys as KEY_1..KEY_N
+            IFS=',' read -ra OF_KEYS <<< "$ONFINALITY_KEYS"
+            for i in "${!OF_KEYS[@]}"; do
+              export "KEY_$((i+1))=${OF_KEYS[$i]}"
+            done
+            # RPC_URLS already set from detect step
+            ./target/release/batch-blocks --slots-file slots.txt
+          else
+            echo "No OnFinality keys — using Orbitflare"
+            ./target/release/batch-blocks --slots-file slots.txt
+          fi
 
       - name: Extract SOL/USD OHLCV
         run: |

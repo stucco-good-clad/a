@@ -19,6 +19,7 @@ struct RpcConfig {
     urls: Vec<String>,
     keys: Vec<String>,
     batch_size: usize,
+    api_key_param: String,
 }
 
 struct FetchStats {
@@ -79,15 +80,20 @@ fn load_config() -> Result<RpcConfig, Box<dyn std::error::Error>> {
         .parse()
         .unwrap_or(DEFAULT_BATCH_SIZE);
 
+    let api_key_param = env::var("API_KEY_PARAM")
+        .unwrap_or_else(|_| "api_key".to_string());
+
     println!("RPC servers: {} (round-robin)", urls.len());
     for (i, u) in urls.iter().enumerate() {
         println!("  [{}] {}", i + 1, u);
     }
+    println!("API key param: {}", api_key_param);
 
     Ok(RpcConfig {
         urls,
         keys,
         batch_size,
+        api_key_param,
     })
 }
 
@@ -354,6 +360,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config()?;
     let n_keys = config.keys.len();
     let n_servers = config.urls.len();
+    let api_key_param = config.api_key_param.clone();
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
@@ -416,6 +423,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
     let keys = Arc::new(config.keys);
     let urls = Arc::new(config.urls);
+    let api_key_param = Arc::new(api_key_param);
 
     let mut handles = Vec::with_capacity(total_batches);
 
@@ -425,13 +433,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let urls = Arc::clone(&urls);
         let stats = Arc::clone(&stats);
         let semaphore = Arc::clone(&semaphore);
+        let api_key_param = Arc::clone(&api_key_param);
 
         let handle = tokio::spawn(async move {
             let _permit = semaphore.acquire().await.expect("semaphore closed");
 
             let key_idx = batch_idx % keys.len();
             let server_idx = batch_idx % urls.len();
-            let url = format!("{}?api_key={}", urls[server_idx], keys[key_idx]);
+            let url = format!("{}?{}={}", urls[server_idx], api_key_param, keys[key_idx]);
 
             let mut batch_reqs = Vec::with_capacity(slot_batch.len());
             for (i, &slot) in slot_batch.iter().enumerate() {
