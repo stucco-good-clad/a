@@ -557,8 +557,7 @@ fn main() {
             }
         }
 
-        if result.sol_usd_count > 0 {
-            let trades = block_trades.get(&result.slot).unwrap();
+        if let Some(trades) = block_trades.get(&result.slot) {
             let filtered = filter_outliers(trades);
             let dropped = trades.len() - filtered.len();
             outliers_filtered += dropped as u64;
