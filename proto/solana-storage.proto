@@ -15,7 +15,7 @@ message TransactionStatusMeta {
   repeated bytes loaded_writable_addresses = 10;
   repeated bytes loaded_readonly_addresses = 11;
   bytes return_data = 12;
-  uint64 compute_units_consumed = 13;
+  bytes compute_units_consumed = 13;
 }
 
 message TransactionError {
