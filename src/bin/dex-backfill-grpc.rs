@@ -3,7 +3,7 @@ use futures::stream::{self, StreamExt};
 use serde_json::{json, Value};
 use solana_sdk::transaction::VersionedTransaction;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+
 use std::sync::Arc;
 
 const DEX_PROGRAMS: &[&str] = &[
@@ -107,13 +107,13 @@ fn process_rpc_block(slot: u64, block: &Value) -> Vec<(u64, Option<i64>, f64, f6
             VersionedMessage::Legacy(m) => m.instructions.iter().any(|i| {
                 account_keys
                     .get(i.program_id_index as usize)
-                    .map(is_dex_program)
+                    .map(|k| is_dex_program(k))
                     .unwrap_or(false)
             }),
             VersionedMessage::V0(m) => m.instructions.iter().any(|i| {
                 account_keys
                     .get(i.program_id_index as usize)
-                    .map(is_dex_program)
+                    .map(|k| is_dex_program(k))
                     .unwrap_or(false)
             }),
         };
