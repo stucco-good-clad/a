@@ -233,11 +233,11 @@ fn filter_block(block: &Value) -> Option<(Value, u64, u64, u64)> {
     Some((block, total, kept, dropped))
 }
 
-fn write_block(slot: u64, block: &Value, stats: &FetchStats) {
+async fn write_block(slot: u64, block: &Value, stats: &FetchStats) {
     match serde_json::to_string(block) {
         Ok(text) => {
             let path = format!("raw/{}.txt", slot);
-            match fs::write(&path, &text) {
+            match tokio::fs::write(&path, &text).await {
                 Ok(()) => {
                     stats.block_ok.fetch_add(1, Ordering::Relaxed);
                 }
@@ -261,25 +261,15 @@ async fn fetch_block_with_retry(
     stats: &FetchStats,
     key_idx: usize,
 ) {
-    let body = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getBlock",
-        "params": [
-            slot,
-            {
-                "encoding": "json",
-                "transactionDetails": "full",
-                "rewards": false,
-                "maxSupportedTransactionVersion": 0
-            }
-        ]
-    });
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"getBlock","params":[{},{{"encoding":"json","transactionDetails":"full","rewards":false,"maxSupportedTransactionVersion":0}}]}}"#,
+        slot
+    );
 
     let mut last_error = None;
 
     for attempt in 0..MAX_RETRY_ATTEMPTS {
-        match client.post(url).json(&body).send().await {
+        match client.post(url).header("content-type", "application/json").body(body.clone()).send().await {
             Ok(resp) => {
                 if resp.status().is_success() {
                     stats.req_ok.fetch_add(1, Ordering::Relaxed);
@@ -306,7 +296,7 @@ async fn fetch_block_with_retry(
                                                 .block_filtered
                                                 .fetch_add(1, Ordering::Relaxed);
                                         }
-                                        write_block(slot, &filtered, stats);
+                                        write_block(slot, &filtered, stats).await;
                                     }
                                 } else if block.is_null() {
                                     stats.block_err.fetch_add(1, Ordering::Relaxed);
