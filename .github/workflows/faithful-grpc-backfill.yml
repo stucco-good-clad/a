@@ -92,8 +92,8 @@ jobs:
           CID=$(curl -sf "https://files.old-faithful.net/${EPOCH}/epoch-${EPOCH}.cid" | tr -d '[:space:]')
           echo "Epoch $EPOCH CID: $CID"
           BASE="https://files.old-faithful.net/${EPOCH}/epoch-${EPOCH}"
-          printf 'version: 1\nepoch: %s\ndata:\n  car:\n    uri: %s.car\nindexes:\n  cid_to_offset_and_size:\n    uri: %s-%s-mainnet-cid-to-offset-and-size.index\n  slot_to_cid:\n    uri: %s-%s-mainnet-slot-to-cid.index\n  sig_to_cid:\n    uri: %s-%s-mainnet-sig-to-cid.index\n  sig_exists:\n    uri: %s-%s-mainnet-sig-exists.index\n' \
-            "$EPOCH" "$BASE" "$BASE" "$CID" "$BASE" "$CID" "$BASE" "$CID" "$BASE" "$CID" \
+          printf 'version: 1\nepoch: %s\ndata:\n  car:\n    uri: %s.car\nindexes:\n  cid_to_offset_and_size:\n    uri: %s-%s-mainnet-cid-to-offset-and-size.index\n  slot_to_cid:\n    uri: %s-%s-mainnet-slot-to-cid.index\n  sig_to_cid:\n    uri: %s-%s-mainnet-sig-to-cid.index\n  sig_exists:\n    uri: %s-%s-mainnet-sig-exists.index\n  slot_to_blocktime:\n    uri: %s-%s-mainnet-slot-to-blocktime.index\n' \
+            "$EPOCH" "$BASE" "$BASE" "$CID" "$BASE" "$CID" "$BASE" "$CID" "$BASE" "$CID" "$BASE" "$CID" \
             > "configs/epoch-${EPOCH}.yml"
           cat "configs/epoch-${EPOCH}.yml"
 
