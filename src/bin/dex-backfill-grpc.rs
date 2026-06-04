@@ -67,13 +67,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = OldFaithfulClient::new(channel)
         .max_decoding_message_size(64 * 1024 * 1024);
 
-    eprintln!("Streaming blocks {}..{} (DEX filtered by meta token balances)", start_slot, end_slot);
+    eprintln!("Streaming blocks {}..{} (account_include filter)", start_slot, end_slot);
 
     let response = client
         .stream_blocks(StreamBlocksRequest {
             start_slot,
             end_slot,
-            filter: None,
+            filter: Some(old_faithful::StreamBlocksFilter {
+                account_include: DEX_PROGRAMS.iter().map(|s| s.to_string()).collect(),
+            }),
         })
         .await?
         .into_inner();
