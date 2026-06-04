@@ -37,8 +37,6 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Build binary
-        env:
-          RUSTFLAGS: "-C target-cpu=native"
         run: cargo build --release --bin dex-backfill-grpc
 
       - name: Upload binary artifact
