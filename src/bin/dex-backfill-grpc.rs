@@ -140,10 +140,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("Connecting to {}", endpoint);
     let channel = Endpoint::from_shared(endpoint)?
-        .max_frame_size(16 * 1024 * 1024 - 1)
+        .max_frame_size(64 * 1024 * 1024)
         .connect()
         .await?;
-    let mut client = OldFaithfulClient::new(channel);
+    let mut client = OldFaithfulClient::new(channel)
+        .max_decoding_message_size(64 * 1024 * 1024);
 
     eprintln!("Streaming ALL blocks {}..{} (no filter, DEX filtered client-side)", start_slot, end_slot);
 
@@ -161,7 +162,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut total_blocks = 0u64;
     let mut total_tx = 0u64;
     let mut total_trades = 0u64;
+    let mut dex_hit = 0u64;
     let mut parse_errors = 0u64;
+    let mut grpc_errors = 0u64;
     let started = std::time::Instant::now();
     let mut last_report = std::time::Instant::now();
 
@@ -170,7 +173,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let block = match result {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("[grpc] block error: {}", e);
+                grpc_errors += 1;
+                if grpc_errors <= 10 {
+                    eprintln!("[grpc] block error: {}", e);
+                }
                 continue;
             }
         };
@@ -187,12 +193,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(versioned_tx) => {
                     if let Some((input, account_keys)) = convert_to_solana_input(slot, block_time, &versioned_tx) {
                         let has_dex = account_keys.iter().any(|k| DEX_PROGRAMS.iter().any(|p| *p == k.as_str()));
+                        if has_dex {
+                            dex_hit += 1;
+                        }
                         if !has_dex {
                             continue;
                         }
                         let mut cfg = ParseConfig::default();
                         cfg.program_ids = Some(DEX_PROGRAMS.iter().map(|p| p.to_string()).collect());
                         let trades = dex_parser.parse_trades(&input, Some(cfg));
+                        if dex_hit <= 3 && !trades.is_empty() {
+                            eprintln!("[dex] slot={} trades={} first trade: in={} out={}",
+                                slot, trades.len(),
+                                trades[0].input_token.mint,
+                                trades[0].output_token.mint);
+                        }
+                        if dex_hit <= 3 && trades.is_empty() {
+                            let outer_progs: Vec<String> = input.instructions.iter().map(|i| {
+                                account_keys.get(i.program_id_index as usize).cloned().unwrap_or_default()
+                            }).collect();
+                            eprintln!("[dex] slot={} NO trades. outer_programs={:?} account_keys_count={}",
+                                slot, outer_progs, account_keys.len());
+                        }
                         for trade in &trades {
                             let im = &trade.input_token.mint;
                             let om = &trade.output_token.mint;
@@ -245,8 +267,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let elapsed = started.elapsed().as_secs_f64();
             let rps = total_blocks as f64 / elapsed;
             eprintln!(
-                "[grpc] blocks={} txns={} trades={} parse_errs={} ohlcv={} rps={:.1} elapsed={:.1}s",
-                total_blocks, total_tx, total_trades, parse_errors, slot_ohlcv.len(), rps, elapsed
+                "[grpc] blocks={} txns={} dex_hit={} trades={} ohlcv={} parse_errs={} grpc_errs={} rps={:.1} elapsed={:.1}s",
+                total_blocks, total_tx, dex_hit, total_trades, slot_ohlcv.len(), parse_errors, grpc_errors, rps, elapsed
             );
             last_report = std::time::Instant::now();
         }
@@ -254,8 +276,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let elapsed = started.elapsed().as_secs_f64();
     eprintln!(
-        "Done. blocks={} txns={} trades={} parse_errs={} rps={:.1} elapsed={:.1}s",
-        total_blocks, total_tx, total_trades, parse_errors, total_blocks as f64 / elapsed, elapsed
+        "Done. blocks={} txns={} dex_hit={} trades={} parse_errs={} grpc_errs={} rps={:.1} elapsed={:.1}s",
+        total_blocks, total_tx, dex_hit, total_trades, parse_errors, grpc_errors, total_blocks as f64 / elapsed, elapsed
     );
 
     eprintln!("Writing OHLCV for {} slots...", slot_ohlcv.len());
