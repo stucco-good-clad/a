@@ -1,19 +1,13 @@
 name: Faithful gRPC DEX Backfill
 
 on:
-  workflow_dispatch:
-    inputs:
-      start_epoch:
-        description: 'Start epoch (inclusive)'
-        required: true
-        type: number
-      end_epoch:
-        description: 'End epoch (inclusive)'
-        required: true
-        type: number
+  push:
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
+  START_EPOCH: "800"
+  END_EPOCH: "800"
   RUST_BACKTRACE: 1
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
@@ -50,8 +44,8 @@ jobs:
       - name: Generate epoch list
         id: gen_epochs
         run: |
-          START=${{ github.event.inputs.start_epoch }}
-          END=${{ github.event.inputs.end_epoch }}
+          START=$START_EPOCH
+          END=$END_EPOCH
           if [ "$START" -gt "$END" ]; then
             echo "Error: start_epoch ($START) > end_epoch ($END)"
             exit 1
@@ -204,8 +198,8 @@ jobs:
 
       - name: Create release zip
         run: |
-          START=${{ github.event.inputs.start_epoch }}
-          END=${{ github.event.inputs.end_epoch }}
+          START=$START_EPOCH
+          END=$END_EPOCH
           ZIPNAME="faithful-dex-${START}-${END}.zip"
           cd merged
           zip -r "../${ZIPNAME}" .
@@ -215,9 +209,9 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: faithful-dex-${{ github.event.inputs.start_epoch }}-${{ github.event.inputs.end_epoch }}
-          name: Faithful DEX Backfill ${{ github.event.inputs.start_epoch }}-${{ github.event.inputs.end_epoch }}
+          tag_name: faithful-dex-${{ env.START_EPOCH }}-${{ env.END_EPOCH }}
+          name: Faithful DEX Backfill ${{ env.START_EPOCH }}-${{ env.END_EPOCH }}
           body: |
-            gRPC DEX backfill using Old Faithful for epochs ${{ github.event.inputs.start_epoch }} to ${{ github.event.inputs.end_epoch }}
+            gRPC DEX backfill using Old Faithful for epochs ${{ env.START_EPOCH }} to ${{ env.END_EPOCH }}
           files: ${{ env.ZIPNAME }}
           fail_on_unmatched_files: false
