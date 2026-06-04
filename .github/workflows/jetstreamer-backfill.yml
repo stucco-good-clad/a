@@ -30,12 +30,12 @@ env:
   RUST_BACKTRACE: 1
   CC: clang
   CXX: clang++
-  LIBCLANG_PATH: /usr/lib/llvm16/lib/libclang.so
+  LIBCLANG_PATH: /usr/lib/llvm-16/lib
 
 jobs:
   build:
     name: Build dex-backfill binary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       epochs: ${{ steps.gen_epochs.outputs.epochs }}
     steps:
@@ -55,9 +55,10 @@ jobs:
       - name: Install Clang 16
         run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 16
-          sudo apt update && sudo apt install -y gcc-13 g++-13 zlib1g-dev libssl-dev libtool
+          sudo apt-get update && sudo apt-get install -y gcc-13 g++-13 zlib1g-dev libssl-dev libtool
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-16 100
+          echo "LIBCLANG_PATH=/usr/lib/llvm-16/lib" >> $GITHUB_ENV
 
       - name: Build binary
         run: cargo build --release --bin dex-backfill
@@ -87,7 +88,7 @@ jobs:
   backfill:
     name: Epoch ${{ matrix.epoch }}
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 300
     strategy:
       fail-fast: false
@@ -131,7 +132,7 @@ jobs:
   release:
     name: Archive results
     needs: backfill
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: success()
     steps:
       - name: Download all epoch artifacts
