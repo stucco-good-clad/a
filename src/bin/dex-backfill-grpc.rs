@@ -1,7 +1,6 @@
 use futures::stream::StreamExt;
+use prost::Message as ProstMessage;
 use solana_sdk::transaction::VersionedTransaction;
-use solana_tx_parser::types::LoadedAddressesInput;
-use solana_tx_parser::{DexParser, ParseConfig, RawInstruction, SolanaTransactionInput, TransactionMetaInput};
 use std::collections::HashMap;
 use tonic::transport::Endpoint;
 
@@ -9,8 +8,13 @@ pub mod old_faithful {
     tonic::include_proto!("old_faithful");
 }
 
+pub mod solana_meta {
+    include!(concat!(env!("OUT_DIR"), "/solana_storage.rs"));
+}
+
 use old_faithful::old_faithful_client::OldFaithfulClient;
 use old_faithful::StreamBlocksRequest;
+use solana_meta::TransactionStatusMeta;
 
 const DEX_PROGRAMS: &[&str] = &[
     "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
@@ -31,81 +35,6 @@ fn bs58_encode(bytes: &[u8]) -> String {
     bs58::encode(bytes).into_string()
 }
 
-fn convert_to_solana_input(
-    slot: u64,
-    block_time: Option<i64>,
-    tx: &VersionedTransaction,
-) -> Option<(SolanaTransactionInput, Vec<String>)> {
-    use solana_sdk::message::VersionedMessage;
-
-    let (account_keys, instructions, loaded_addresses) = match &tx.message {
-        VersionedMessage::Legacy(m) => {
-            let keys: Vec<String> = m.account_keys.iter().map(|k| bs58_encode(&k.to_bytes())).collect();
-            let instrs: Vec<RawInstruction> = m.instructions.iter().map(|i| {
-                RawInstruction {
-                    program_id_index: i.program_id_index,
-                    account_key_indexes: i.accounts.clone(),
-                    data: i.data.clone(),
-                }
-            }).collect();
-            (keys, instrs, None)
-        }
-        VersionedMessage::V0(m) => {
-            let keys: Vec<String> = m.account_keys.iter().map(|k| bs58_encode(&k.to_bytes())).collect();
-            let instrs: Vec<RawInstruction> = m.instructions.iter().map(|i| {
-                RawInstruction {
-                    program_id_index: i.program_id_index,
-                    account_key_indexes: i.accounts.clone(),
-                    data: i.data.clone(),
-                }
-            }).collect();
-            let loaded = if !m.address_table_lookups.is_empty() {
-                let mut writable = Vec::new();
-                let mut readonly = Vec::new();
-                for lookup in &m.address_table_lookups {
-                    let table_key = bs58_encode(&lookup.account_key.to_bytes());
-                    for &idx in &lookup.writable_indexes {
-                        writable.push(format!("{}:{}", table_key, idx));
-                    }
-                    for &idx in &lookup.readonly_indexes {
-                        readonly.push(format!("{}:{}", table_key, idx));
-                    }
-                }
-                Some(LoadedAddressesInput { writable, readonly })
-            } else {
-                None
-            };
-            (keys, instrs, loaded)
-        }
-    };
-
-    let signatures: Vec<Vec<u8>> = tx.signatures.iter().map(|s| s.as_ref().to_vec()).collect();
-
-    Some((
-        SolanaTransactionInput {
-            slot,
-            block_time,
-            version: Some(0),
-            signatures,
-            account_keys: account_keys.clone(),
-            instructions,
-            inner_instructions: None,
-            meta: Some(TransactionMetaInput {
-                err: None,
-                fee: None,
-                pre_balances: None,
-                post_balances: None,
-                pre_token_balances: None,
-                post_token_balances: None,
-                inner_instructions: None,
-                loaded_addresses,
-                compute_units_consumed: None,
-            }),
-        },
-        account_keys,
-    ))
-}
-
 #[derive(Debug, Default)]
 struct SlotOhlcv {
     block_time: Option<i64>,
@@ -114,14 +43,6 @@ struct SlotOhlcv {
     sell_volume: f64,
     num_trades: usize,
     sol_usd_prices: Vec<f64>,
-}
-
-fn is_sol(mint: &str) -> bool {
-    mint == SOL_MINT
-}
-
-fn is_stablecoin(mint: &str) -> bool {
-    mint == USDC_MINT || mint == USDT_MINT
 }
 
 #[tokio::main]
@@ -146,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = OldFaithfulClient::new(channel)
         .max_decoding_message_size(64 * 1024 * 1024);
 
-    eprintln!("Streaming ALL blocks {}..{} (no filter, DEX filtered client-side)", start_slot, end_slot);
+    eprintln!("Streaming blocks {}..{} (DEX filtered by meta token balances)", start_slot, end_slot);
 
     let response = client
         .stream_blocks(StreamBlocksRequest {
@@ -157,11 +78,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?
         .into_inner();
 
-    let dex_parser = DexParser::new();
     let mut slot_ohlcv: HashMap<u64, SlotOhlcv> = HashMap::new();
     let mut total_blocks = 0u64;
     let mut total_tx = 0u64;
     let mut total_trades = 0u64;
+    let mut meta_decoded = 0u64;
+    let mut meta_errors = 0u64;
     let mut dex_hit = 0u64;
     let mut parse_errors = 0u64;
     let mut grpc_errors = 0u64;
@@ -189,70 +111,132 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         for tx in &block.transactions {
             total_tx += 1;
-            match bincode::deserialize::<VersionedTransaction>(&tx.transaction) {
-                Ok(versioned_tx) => {
-                    if let Some((input, _account_keys)) = convert_to_solana_input(slot, block_time, &versioned_tx) {
-                        let outer_dex = input.instructions.iter().any(|i| {
-                            input.account_keys.get(i.program_id_index as usize)
-                                .map(|k| DEX_PROGRAMS.iter().any(|p| *p == k.as_str()))
-                                .unwrap_or(false)
-                        });
-                        if !outer_dex {
-                            continue;
-                        }
-                        dex_hit += 1;
-                        let mut cfg = ParseConfig::default();
-                        cfg.program_ids = Some(DEX_PROGRAMS.iter().map(|p| p.to_string()).collect());
-                        let trades = dex_parser.parse_trades(&input, Some(cfg));
-                        if dex_hit <= 5 {
-                            eprintln!("[dex] slot={} trades={} outer_progs={:?}",
-                                slot, trades.len(),
-                                input.instructions.iter().map(|i| {
-                                    input.account_keys.get(i.program_id_index as usize).cloned().unwrap_or_default()
-                                }).collect::<Vec<_>>());
-                        }
-                        for trade in &trades {
-                            let im = &trade.input_token.mint;
-                            let om = &trade.output_token.mint;
-                            let (sol_price, sol_amount, is_buy) = if is_sol(im) && is_stablecoin(om) {
-                                let p = if trade.input_token.amount > 0.0 {
-                                    trade.output_token.amount / trade.input_token.amount
-                                } else {
-                                    0.0
-                                };
-                                (p, trade.input_token.amount, false)
-                            } else if is_stablecoin(im) && is_sol(om) {
-                                let p = if trade.output_token.amount > 0.0 {
-                                    trade.input_token.amount / trade.output_token.amount
-                                } else {
-                                    0.0
-                                };
-                                (p, trade.output_token.amount, true)
-                            } else {
-                                continue;
-                            };
-                            if sol_price > 0.0 && sol_amount > 0.0 {
-                                total_trades += 1;
-                                let entry = slot_ohlcv.entry(slot).or_insert_with(|| SlotOhlcv {
-                                    block_time,
-                                    ..Default::default()
-                                });
-                                entry.sol_usd_prices.push(sol_price);
-                                entry.volume += sol_amount;
-                                entry.num_trades += 1;
-                                if is_buy {
-                                    entry.buy_volume += sol_amount;
-                                } else {
-                                    entry.sell_volume += sol_amount;
-                                }
-                            }
-                        }
-                    }
-                }
+
+            let versioned_tx = match bincode::deserialize::<VersionedTransaction>(&tx.transaction) {
+                Ok(v) => v,
                 Err(e) => {
                     parse_errors += 1;
                     if parse_errors <= 5 {
-                        eprintln!("[grpc] slot={} bincode deserialize error: {}", slot, e);
+                        eprintln!("[grpc] slot={} bincode error: {}", slot, e);
+                    }
+                    continue;
+                }
+            };
+
+            use solana_sdk::message::VersionedMessage;
+            let account_keys: Vec<String> = match &versioned_tx.message {
+                VersionedMessage::Legacy(m) => {
+                    m.account_keys.iter().map(|k| bs58_encode(&k.to_bytes())).collect()
+                }
+                VersionedMessage::V0(m) => {
+                    m.account_keys.iter().map(|k| bs58_encode(&k.to_bytes())).collect()
+                }
+            };
+
+            let outer_dex = match &versioned_tx.message {
+                VersionedMessage::Legacy(m) => m.instructions.iter().any(|i| {
+                    account_keys.get(i.program_id_index as usize)
+                        .map(|k| DEX_PROGRAMS.iter().any(|p| *p == k.as_str()))
+                        .unwrap_or(false)
+                }),
+                VersionedMessage::V0(m) => m.instructions.iter().any(|i| {
+                    account_keys.get(i.program_id_index as usize)
+                        .map(|k| DEX_PROGRAMS.iter().any(|p| *p == k.as_str()))
+                        .unwrap_or(false)
+                }),
+            };
+            if !outer_dex {
+                continue;
+            }
+            dex_hit += 1;
+
+            if tx.meta.is_empty() {
+                continue;
+            }
+            let meta = match TransactionStatusMeta::decode(&tx.meta[..]) {
+                Ok(m) => {
+                    meta_decoded += 1;
+                    m
+                }
+                Err(e) => {
+                    meta_errors += 1;
+                    if meta_errors <= 5 {
+                        eprintln!("[grpc] slot={} meta decode error: {}", slot, e);
+                    }
+                    continue;
+                }
+            };
+
+            if meta.err.is_some() {
+                continue;
+            }
+
+            let signer = match account_keys.first() {
+                Some(k) => k.clone(),
+                None => continue,
+            };
+
+            let signer_idx = 0usize;
+
+            let fee = meta.fee;
+            let pre_sol = meta.pre_balances.get(signer_idx).copied().unwrap_or(0);
+            let post_sol = meta.post_balances.get(signer_idx).copied().unwrap_or(0);
+            let native_sol_change: i128 = post_sol as i128 - pre_sol as i128;
+
+            let mut wsol_change: i128 = 0;
+            let mut usdc_change: i128 = 0;
+            let mut usdt_change: i128 = 0;
+
+            for post_bal in &meta.post_token_balances {
+                if post_bal.owner != signer {
+                    continue;
+                }
+                let pre_amount: i128 = meta.pre_token_balances.iter()
+                    .find(|p| p.account_index == post_bal.account_index)
+                    .and_then(|p| p.ui_token_amount.as_ref())
+                    .map(|a| a.amount as i128)
+                    .unwrap_or(0);
+                let post_amount: i128 = post_bal.ui_token_amount.as_ref()
+                    .map(|a| a.amount as i128)
+                    .unwrap_or(0);
+                let change = post_amount - pre_amount;
+                if change == 0 {
+                    continue;
+                }
+                match post_bal.mint.as_str() {
+                    SOL_MINT => wsol_change += change,
+                    USDC_MINT => usdc_change += change,
+                    USDT_MINT => usdt_change += change,
+                    _ => {}
+                }
+            }
+
+            let stablecoin_change = usdc_change + usdt_change;
+            let total_sol_spent: i128 = -(native_sol_change + fee as i128) - wsol_change;
+
+            if total_sol_spent != 0 && stablecoin_change != 0 {
+                let sol_amount = (total_sol_spent.unsigned_abs() as f64) / 1e9;
+                let usd_amount = (stablecoin_change.unsigned_abs() as f64) / 1e6;
+                let sol_price = usd_amount / sol_amount;
+                let is_buy = total_sol_spent < 0;
+
+                if sol_price > 0.0 && sol_amount > 0.0 && sol_price < 10000.0 {
+                    total_trades += 1;
+                    if dex_hit <= 5 {
+                        eprintln!("[dex] slot={} TRADE sol={:.4} usd={:.2} price={:.4} buy={}",
+                            slot, sol_amount, usd_amount, sol_price, is_buy);
+                    }
+                    let entry = slot_ohlcv.entry(slot).or_insert_with(|| SlotOhlcv {
+                        block_time,
+                        ..Default::default()
+                    });
+                    entry.sol_usd_prices.push(sol_price);
+                    entry.volume += sol_amount;
+                    entry.num_trades += 1;
+                    if is_buy {
+                        entry.buy_volume += sol_amount;
+                    } else {
+                        entry.sell_volume += sol_amount;
                     }
                 }
             }
@@ -261,10 +245,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_blocks += 1;
         if last_report.elapsed().as_secs() >= 5 {
             let elapsed = started.elapsed().as_secs_f64();
-            let rps = total_blocks as f64 / elapsed;
+            let bps = total_blocks as f64 / elapsed;
             eprintln!(
-                "[grpc] blocks={} txns={} dex_hit={} trades={} ohlcv={} parse_errs={} grpc_errs={} rps={:.1} elapsed={:.1}s",
-                total_blocks, total_tx, dex_hit, total_trades, slot_ohlcv.len(), parse_errors, grpc_errors, rps, elapsed
+                "[grpc] blocks={} txns={} dex_hit={} trades={} ohlcv={} meta_ok={} meta_err={} parse_errs={} grpc_errs={} bps={:.1} elapsed={:.1}s",
+                total_blocks, total_tx, dex_hit, total_trades, slot_ohlcv.len(), meta_decoded, meta_errors, parse_errors, grpc_errors, bps, elapsed
             );
             last_report = std::time::Instant::now();
         }
@@ -272,8 +256,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let elapsed = started.elapsed().as_secs_f64();
     eprintln!(
-        "Done. blocks={} txns={} dex_hit={} trades={} parse_errs={} grpc_errs={} rps={:.1} elapsed={:.1}s",
-        total_blocks, total_tx, dex_hit, total_trades, parse_errors, grpc_errors, total_blocks as f64 / elapsed, elapsed
+        "Done. blocks={} txns={} dex_hit={} trades={} meta_ok={} meta_err={} parse_errs={} grpc_errs={} bps={:.1} elapsed={:.1}s",
+        total_blocks, total_tx, dex_hit, total_trades, meta_decoded, meta_errors, parse_errors, grpc_errors, total_blocks as f64 / elapsed, elapsed
     );
 
     eprintln!("Writing OHLCV for {} slots...", slot_ohlcv.len());

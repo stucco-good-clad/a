@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package solana_storage;
+
+message TransactionStatusMeta {
+  TransactionError err = 1;
+  uint64 fee = 2;
+  repeated uint64 pre_balances = 3;
+  repeated uint64 post_balances = 4;
+  repeated InnerInstructions inner_instructions = 5;
+  repeated string log_messages = 6;
+  repeated TokenBalance pre_token_balances = 7;
+  repeated TokenBalance post_token_balances = 8;
+  repeated Reward rewards = 9;
+  bytes loaded_writable_addresses = 10;
+  bytes loaded_readonly_addresses = 11;
+  bytes return_data = 12;
+  optional uint64 compute_units_consumed = 13;
+}
+
+message TransactionError {
+  bytes err = 1;
+}
+
+message InnerInstructions {
+  uint32 index = 1;
+  repeated InnerInstruction instructions = 2;
+}
+
+message InnerInstruction {
+  CompiledInstruction instruction = 1;
+}
+
+message CompiledInstruction {
+  uint32 program_id_index = 1;
+  bytes data = 2;
+  repeated uint32 accounts = 3;
+}
+
+message TokenBalance {
+  uint32 account_index = 1;
+  string mint = 2;
+  UiTokenAmount ui_token_amount = 3;
+  string owner = 4;
+}
+
+message UiTokenAmount {
+  uint64 amount = 1;
+  uint32 decimals = 2;
+  string ui_amount_string = 3;
+}
+
+message Reward {
+  string pubkey = 1;
+  uint64 lamports = 2;
+  uint64 post_balance = 3;
+  uint32 reward_type = 4;
+  uint64 commission = 5;
+}
