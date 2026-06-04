@@ -159,8 +159,10 @@ fn process_rpc_block(slot: u64, block: &Value) -> Vec<(u64, Option<i64>, f64, f6
                 let post_amount: i128 = post_bal
                     .get("uiTokenAmount")
                     .and_then(|u| u.get("amount"))
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse().ok())
+                    .and_then(|v| {
+                        v.as_str().and_then(|s| s.parse().ok())
+                            .or_else(|| v.as_u64().map(|n| n as i128))
+                    })
                     .unwrap_or(0);
 
                 let pre_amount: i128 = pre_token
@@ -172,8 +174,10 @@ fn process_rpc_block(slot: u64, block: &Value) -> Vec<(u64, Option<i64>, f64, f6
                     .and_then(|p| {
                         p.get("uiTokenAmount")
                             .and_then(|u| u.get("amount"))
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| s.parse().ok())
+                            .and_then(|v| {
+                                v.as_str().and_then(|s| s.parse().ok())
+                                    .or_else(|| v.as_u64().map(|n| n as i128))
+                            })
                     })
                     .unwrap_or(0);
 
@@ -242,6 +246,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut found_trades = 0u64;
     let mut not_found = 0u64;
     let mut meta_errs = 0u64;
+    let mut has_token_balances = 0u64;
+    let mut no_token_balances = 0u64;
     let started = std::time::Instant::now();
 
     let rpc_url = Arc::new(rpc_url);
