@@ -46,8 +46,8 @@ dashmap = "6"
 futures = "0.3"
 jetstreamer = "0.6"
 memmap2 = "0.9"
-prost = "0.13"
-prost-types = "0.13"
+prost = "0.14"
+prost-types = "0.14"
 rand = "0.8"
 rayon = "1"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
@@ -62,7 +62,7 @@ tonic = "0.14"
 zip = "2"
 
 [build-dependencies]
-tonic-build = "0.14"
+tonic-prost-build = "0.14"
 
 [profile.release]
 opt-level = 3
