@@ -1,6 +1,5 @@
 use futures::stream::StreamExt;
-use solana_message::VersionedMessage;
-use solana_transaction::VersionedTransaction;
+use solana_sdk::versioned_transaction::VersionedTransaction;
 use solana_tx_parser::types::LoadedAddressesInput;
 use solana_tx_parser::{DexParser, ParseConfig, RawInstruction, SolanaTransactionInput, TransactionMetaInput};
 use std::collections::HashMap;
@@ -37,9 +36,11 @@ fn convert_to_solana_input(
     block_time: Option<i64>,
     tx: &VersionedTransaction,
 ) -> Option<(SolanaTransactionInput, Vec<String>)> {
+    use solana_sdk::message::VersionedMessage;
+
     let (account_keys, instructions, loaded_addresses) = match &tx.message {
         VersionedMessage::Legacy(m) => {
-            let keys: Vec<String> = m.account_keys.iter().map(|k| bs58_encode(&k.0)).collect();
+            let keys: Vec<String> = m.account_keys.iter().map(|k| bs58_encode(&k.to_bytes())).collect();
             let instrs: Vec<RawInstruction> = m.instructions.iter().map(|i| {
                 RawInstruction {
                     program_id_index: i.program_id_index,
@@ -50,7 +51,7 @@ fn convert_to_solana_input(
             (keys, instrs, None)
         }
         VersionedMessage::V0(m) => {
-            let keys: Vec<String> = m.account_keys.iter().map(|k| bs58_encode(&k.0)).collect();
+            let keys: Vec<String> = m.account_keys.iter().map(|k| bs58_encode(&k.to_bytes())).collect();
             let instrs: Vec<RawInstruction> = m.instructions.iter().map(|i| {
                 RawInstruction {
                     program_id_index: i.program_id_index,
@@ -62,7 +63,7 @@ fn convert_to_solana_input(
                 let mut writable = Vec::new();
                 let mut readonly = Vec::new();
                 for lookup in &m.address_table_lookups {
-                    let table_key = bs58_encode(&lookup.account_key.0);
+                    let table_key = bs58_encode(&lookup.account_key.to_bytes());
                     for &idx in &lookup.writable_indexes {
                         writable.push(format!("{}:{}", table_key, idx));
                     }
@@ -78,7 +79,7 @@ fn convert_to_solana_input(
         }
     };
 
-    let signatures: Vec<Vec<u8>> = tx.signatures.iter().map(|s| s.0.to_vec()).collect();
+    let signatures: Vec<Vec<u8>> = tx.signatures.iter().map(|s| s.as_ref().to_vec()).collect();
 
     Some((
         SolanaTransactionInput {
@@ -185,7 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match bincode::deserialize::<VersionedTransaction>(&tx.transaction) {
                 Ok(versioned_tx) => {
                     if let Some((input, account_keys)) = convert_to_solana_input(slot, block_time, &versioned_tx) {
-                        let has_dex = account_keys.iter().any(|k| DEX_PROGRAMS.iter().any(|p| p == k.as_str()));
+                        let has_dex = account_keys.iter().any(|k| DEX_PROGRAMS.iter().any(|p| *p == k.as_str()));
                         if !has_dex {
                             continue;
                         }
