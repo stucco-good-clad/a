@@ -94,11 +94,12 @@ jobs:
             > "configs/epoch-${EPOCH}.yml"
           cat "configs/epoch-${EPOCH}.yml"
 
-      - name: Start faithful-cli RPC server
+      - name: Start faithful-cli RPC + gRPC server
         run: |
           mkdir -p output
           ./faithful-cli rpc \
             --listen=:8888 \
+            --grpc-listen=:8889 \
             --epoch-load-concurrency=1 \
             configs/ > faithful.log 2>&1 &
           FAITHFUL_PID=$!
@@ -131,7 +132,15 @@ jobs:
             tail -20 faithful.log
             exit 1
           }
-          echo "Response: $RESP"
+          echo "JSON-RPC Response: $RESP"
+
+          # Verify gRPC port is listening
+          if ss -tlnp | grep -q ":8889"; then
+            echo "gRPC port 8889 is listening"
+          else
+            echo "WARNING: gRPC port 8889 not found in ss output:"
+            ss -tlnp | grep -E "888[89]"
+          fi
 
       - name: Compute slot range
         run: |
@@ -144,9 +153,8 @@ jobs:
 
       - name: Run gRPC DEX backfill
         env:
-          FAITHFUL_ENDPOINT: "http://127.0.0.1:8888"
+          FAITHFUL_ENDPOINT: "http://127.0.0.1:8889"
           OUTPUT_DIR: "./output"
-          CONCURRENCY: "1000"
         run: |
           ./dex-backfill-grpc
 

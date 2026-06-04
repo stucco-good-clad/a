@@ -1,7 +1,15 @@
-use dashmap::DashMap;
 use futures::stream::StreamExt;
 use solana_tx_parser::types::LoadedAddressesInput;
 use solana_tx_parser::{DexParser, ParseConfig, RawInstruction, SolanaTransactionInput, TransactionMetaInput};
+use std::collections::HashMap;
+use tonic::transport::Endpoint;
+
+pub mod old_faithful {
+    tonic::include_proto!("old_faithful");
+}
+
+use old_faithful::old_faithful_client::OldFaithfulClient;
+use old_faithful::StreamBlocksRequest;
 
 const DEX_PROGRAMS: &[&str] = &[
     "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
@@ -52,88 +60,103 @@ fn parse_transaction(tx_bytes: &[u8]) -> Option<ParsedTx> {
     if tx_bytes.is_empty() {
         return None;
     }
-    let (msg_bytes, is_versioned) = if tx_bytes[0] == 0x80 {
-        (&tx_bytes[1..], true)
-    } else {
-        (tx_bytes, false)
-    };
     let mut off = 0;
-    let num_sigs = read_compact_u16(msg_bytes, &mut off) as usize;
+    let is_versioned = tx_bytes[0] == 0x80;
+    if is_versioned {
+        off += 1;
+    }
+    let num_sigs = read_compact_u16(tx_bytes, &mut off) as usize;
     let end_of_sigs = off + num_sigs * 64;
-    if end_of_sigs > msg_bytes.len() {
+    if end_of_sigs > tx_bytes.len() {
         return None;
     }
     let signatures: Vec<Vec<u8>> = (0..num_sigs)
         .map(|_| {
-            let s = msg_bytes[off..off + 64].to_vec();
+            let s = tx_bytes[off..off + 64].to_vec();
             off += 64;
             s
         })
         .collect();
-    if !is_versioned {
-        off += 3;
+    if off + 3 > tx_bytes.len() {
+        return None;
     }
-    let num_accounts = read_compact_u16(msg_bytes, &mut off) as usize;
+    let num_required_signatures = tx_bytes[off] as usize;
+    let num_readonly_signed = tx_bytes[off + 1] as usize;
+    let num_readonly_unsigned = tx_bytes[off + 2] as usize;
+    off += 3;
+    let num_accounts = num_required_signatures + num_readonly_signed + num_readonly_unsigned;
     let accounts_end = off + num_accounts * 32;
-    if accounts_end > msg_bytes.len() {
+    if accounts_end > tx_bytes.len() {
         return None;
     }
     let account_keys: Vec<Vec<u8>> = (0..num_accounts)
         .map(|_| {
-            let k = msg_bytes[off..off + 32].to_vec();
+            let k = tx_bytes[off..off + 32].to_vec();
             off += 32;
             k
         })
         .collect();
+    if off + 32 > tx_bytes.len() {
+        return None;
+    }
     off += 32;
-    let num_instrs = read_compact_u16(msg_bytes, &mut off) as usize;
+    let num_instrs = read_compact_u16(tx_bytes, &mut off) as usize;
     let mut instructions = Vec::with_capacity(num_instrs);
     for _ in 0..num_instrs {
-        if off >= msg_bytes.len() {
+        if off >= tx_bytes.len() {
             break;
         }
-        let pid = msg_bytes[off];
+        let pid = tx_bytes[off];
         off += 1;
-        let accts_len = read_compact_u16(msg_bytes, &mut off) as usize;
-        if off + accts_len > msg_bytes.len() {
+        let accts_len = read_compact_u16(tx_bytes, &mut off) as usize;
+        if off + accts_len > tx_bytes.len() {
             break;
         }
-        let accts = msg_bytes[off..off + accts_len].to_vec();
+        let accts = tx_bytes[off..off + accts_len].to_vec();
         off += accts_len;
-        let data_len = read_compact_u16(msg_bytes, &mut off) as usize;
-        if off + data_len > msg_bytes.len() {
+        let data_len = read_compact_u16(tx_bytes, &mut off) as usize;
+        if off + data_len > tx_bytes.len() {
             break;
         }
-        let data = msg_bytes[off..off + data_len].to_vec();
+        let data = tx_bytes[off..off + data_len].to_vec();
         off += data_len;
         instructions.push((pid, accts, data));
     }
     let mut loaded_writable = Vec::new();
     let mut loaded_readonly = Vec::new();
-    if is_versioned && off < msg_bytes.len() {
-        let num_lookups = read_compact_u16(msg_bytes, &mut off) as usize;
-        for _ in 0..num_lookups {
-            if off + 32 > msg_bytes.len() {
+    if is_versioned && off < tx_bytes.len() {
+        let num_lookup_tables = tx_bytes[off] as usize;
+        off += 1;
+        for _ in 0..num_lookup_tables {
+            if off + 32 > tx_bytes.len() {
                 break;
             }
             off += 32;
-            let nw = read_compact_u16(msg_bytes, &mut off) as usize;
+            if off >= tx_bytes.len() {
+                break;
+            }
+            let nw = tx_bytes[off] as usize;
+            off += 1;
             for _ in 0..nw {
-                if off >= msg_bytes.len() {
+                if off >= tx_bytes.len() {
                     break;
                 }
-                let idx = msg_bytes[off] as usize;
+                let idx = tx_bytes[off] as usize;
                 off += 1;
                 if idx < account_keys.len() {
                     loaded_writable.push(account_keys[idx].clone());
                 }
             }
-            let nr = read_compact_u16(msg_bytes, &mut off) as usize;
+            if off >= tx_bytes.len() {
+                break;
+            }
+            let nr = tx_bytes[off] as usize;
+            off += 1;
             for _ in 0..nr {
-                if off >= msg_bytes.len() {
+                if off >= tx_bytes.len() {
                     break;
                 }
-                let idx = msg_bytes[off] as usize;
+                let idx = tx_bytes[off] as usize;
                 off += 1;
                 if idx < account_keys.len() {
                     loaded_readonly.push(account_keys[idx].clone());
@@ -213,6 +236,7 @@ fn build_solana_input(
 
 #[derive(Debug, Default)]
 struct SlotOhlcv {
+    block_time: Option<i64>,
     volume: f64,
     buy_volume: f64,
     sell_volume: f64,
@@ -237,38 +261,10 @@ fn is_stablecoin(mint: &str) -> bool {
     mint == USDC_MINT || mint == USDT_MINT
 }
 
-async fn get_block_jsonrpc(
-    client: &reqwest::Client,
-    endpoint: &str,
-    slot: u64,
-) -> Result<serde_json::Value, reqwest::Error> {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": slot,
-        "method": "getBlock",
-        "params": [
-            slot,
-            {
-                "encoding": "base64",
-                "transactionDetails": "full",
-                "rewards": false,
-                "maxSupportedTransactionVersion": 0
-            }
-        ]
-    });
-    client
-        .post(endpoint)
-        .json(&body)
-        .send()
-        .await?
-        .json()
-        .await
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = std::env::var("FAITHFUL_ENDPOINT")
-        .unwrap_or_else(|_| "http://127.0.0.1:8888".to_string());
+        .unwrap_or_else(|_| "http://127.0.0.1:8889".to_string());
     let start_slot: u64 = std::env::var("START_SLOT")
         .unwrap_or_else(|_| "345600000".to_string())
         .parse()?;
@@ -276,210 +272,125 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "346032000".to_string())
         .parse()?;
     let output_dir = std::env::var("OUTPUT_DIR").unwrap_or_else(|_| "./output".to_string());
-    let concurrency: usize = std::env::var("CONCURRENCY")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(200);
 
     std::fs::create_dir_all(&output_dir)?;
 
-    eprintln!(
-        "Fetching blocks {}..{} concurrency={} endpoint={}",
-        start_slot, end_slot, concurrency, endpoint
-    );
+    eprintln!("Connecting to {}", endpoint);
+    let channel = Endpoint::from_shared(endpoint)?
+        .max_frame_size(16 * 1024 * 1024 - 1)
+        .connect()
+        .await?;
+    let mut client = OldFaithfulClient::new(channel);
 
-    let http = reqwest::Client::builder()
-        .pool_max_idle_per_host(concurrency)
-        .build()?;
-    let dex_parser = std::sync::Arc::new(DexParser::new());
-    let slot_ohlcv = std::sync::Arc::new(DashMap::<u64, SlotOhlcv>::new());
-    let counters = std::sync::Arc::new(std::sync::Mutex::new((0u64, 0u64, 0u64)));
+    eprintln!("Streaming ALL blocks {}..{} (no filter, DEX filtered client-side)", start_slot, end_slot);
+
+    let response = client
+        .stream_blocks(StreamBlocksRequest {
+            start_slot,
+            end_slot,
+            filter: None,
+        })
+        .await?
+        .into_inner();
+
+    let dex_parser = DexParser::new();
+    let mut slot_ohlcv: HashMap<u64, SlotOhlcv> = HashMap::new();
+    let mut total_blocks = 0u64;
+    let mut total_tx = 0u64;
+    let mut total_trades = 0u64;
     let started = std::time::Instant::now();
-    let last_report = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let mut last_report = std::time::Instant::now();
 
-    let slots: Vec<u64> = (start_slot..end_slot).collect();
-    let total = slots.len();
-    eprintln!("Total slots: {}", total);
+    let mut stream = response;
+    while let Some(result) = stream.next().await {
+        let block = match result {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[grpc] block error: {}", e);
+                continue;
+            }
+        };
+        let slot = block.slot;
+        let block_time = if block.block_time != 0 {
+            Some(block.block_time)
+        } else {
+            None
+        };
 
-    let stream = futures::stream::iter(slots)
-        .map(|slot| {
-            let http = http.clone();
-            let endpoint = endpoint.clone();
-            let dex_parser = std::sync::Arc::clone(&dex_parser);
-            let slot_ohlcv = std::sync::Arc::clone(&slot_ohlcv);
-            let counters = std::sync::Arc::clone(&counters);
-            let last_report = std::sync::Arc::clone(&last_report);
-            async move {
-                let resp = get_block_jsonrpc(&http, &endpoint, slot).await;
-                match resp {
-                    Ok(val) => {
-                        if let Some(err) = val.get("error") {
-                            let mut c = counters.lock().unwrap();
-                            c.0 += 1;
-                            if c.0 <= 3 {
-                                eprintln!("[rpc] slot={} rpc_error: {}", slot, err);
-                            }
-                            return;
-                        }
-                        let block = match val.get("result").and_then(|r| r.as_object()) {
-                            Some(b) => b,
-                            None => {
-                                let mut c = counters.lock().unwrap();
-                                c.0 += 1;
-                                return;
-                            }
+        for tx in &block.transactions {
+            total_tx += 1;
+            if let Some((input, keys)) = build_solana_input(slot, block_time, &tx.transaction) {
+                if !has_dex_program(&keys) {
+                    continue;
+                }
+                let mut cfg = ParseConfig::default();
+                cfg.program_ids = Some(DEX_PROGRAMS.iter().map(|p| p.to_string()).collect());
+                let trades = dex_parser.parse_trades(&input, Some(cfg));
+                for trade in &trades {
+                    let im = &trade.input_token.mint;
+                    let om = &trade.output_token.mint;
+                    let (sol_price, sol_amount, is_buy) = if is_sol(im) && is_stablecoin(om) {
+                        let p = if trade.input_token.amount > 0.0 {
+                            trade.output_token.amount / trade.input_token.amount
+                        } else {
+                            0.0
                         };
-                        let block_time = block
-                            .get("blockTime")
-                            .and_then(|v| v.as_i64());
-                        let slot_num = block
-                            .get("slot")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(slot);
-
-                        let transactions = match block.get("transactions").and_then(|t| t.as_array()) {
-                            Some(a) => a,
-                            None => {
-                                let mut c = counters.lock().unwrap();
-                                c.0 += 1;
-                                return;
-                            }
+                        (p, trade.input_token.amount, false)
+                    } else if is_stablecoin(im) && is_sol(om) {
+                        let p = if trade.output_token.amount > 0.0 {
+                            trade.input_token.amount / trade.output_token.amount
+                        } else {
+                            0.0
                         };
-
-                        let mut local_tx = 0u64;
-                        let mut local_trades = 0u64;
-                        for tx_obj in transactions {
-                            local_tx += 1;
-                            let tx_b64 = match tx_obj.get("transaction").and_then(|t| t.as_array()) {
-                                Some(arr) => {
-                                    if let Some(s) = arr.first().and_then(|v| v.as_str()) {
-                                        s
-                                    } else {
-                                        continue;
-                                    }
-                                }
-                                None => continue,
-                            };
-                            let tx_bytes = match base64::Engine::decode(
-                                &base64::engine::general_purpose::STANDARD,
-                                tx_b64,
-                            ) {
-                                Ok(b) => b,
-                                Err(_) => continue,
-                            };
-
-                            if let Some((input, keys)) =
-                                build_solana_input(slot_num, block_time, &tx_bytes)
-                            {
-                                if !has_dex_program(&keys) {
-                                    continue;
-                                }
-                                let mut cfg = ParseConfig::default();
-                                cfg.program_ids = Some(
-                                    DEX_PROGRAMS.iter().map(|p| p.to_string()).collect(),
-                                );
-                                let trades = dex_parser.parse_trades(&input, Some(cfg));
-                                for trade in &trades {
-                                    let im = &trade.input_token.mint;
-                                    let om = &trade.output_token.mint;
-                                    let (sol_price, sol_amount, is_buy) =
-                                        if is_sol(im) && is_stablecoin(om) {
-                                            let p = if trade.input_token.amount > 0.0 {
-                                                trade.output_token.amount
-                                                    / trade.input_token.amount
-                                            } else {
-                                                0.0
-                                            };
-                                            (p, trade.input_token.amount, false)
-                                        } else if is_stablecoin(im) && is_sol(om) {
-                                            let p = if trade.output_token.amount > 0.0 {
-                                                trade.input_token.amount
-                                                    / trade.output_token.amount
-                                            } else {
-                                                0.0
-                                            };
-                                            (p, trade.output_token.amount, true)
-                                        } else {
-                                            continue;
-                                        };
-                                    if sol_price > 0.0 && sol_amount > 0.0 {
-                                        local_trades += 1;
-                                        let mut entry =
-                                            slot_ohlcv.entry(slot_num).or_default();
-                                        let data = entry.value_mut();
-                                        data.sol_usd_prices.push(sol_price);
-                                        data.volume += sol_amount;
-                                        data.num_trades += 1;
-                                        if is_buy {
-                                            data.buy_volume += sol_amount;
-                                        } else {
-                                            data.sell_volume += sol_amount;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let mut c = counters.lock().unwrap();
-                        c.0 += 1;
-                        c.1 += local_tx;
-                        c.2 += local_trades;
-                        if c.0 <= 3 {
-                            eprintln!(
-                                "[rpc] slot={} txns={} trades={}",
-                                slot_num, local_tx, local_trades
-                            );
-                        }
-                        let mut lr = last_report.lock().unwrap();
-                        if lr.elapsed().as_secs() >= 5 {
-                            let elapsed = started.elapsed().as_secs_f64();
-                            let rps = c.0 as f64 / elapsed;
-                            eprintln!(
-                                "[rpc] slots={}/{} txns={} trades={} ohlcv={} rps={:.1}s={:.1}s",
-                                c.0,
-                                total,
-                                c.1,
-                                c.2,
-                                slot_ohlcv.len(),
-                                rps,
-                                elapsed
-                            );
-                            *lr = std::time::Instant::now();
-                        }
-                    }
-                    Err(e) => {
-                        let mut c = counters.lock().unwrap();
-                        c.0 += 1;
-                        if c.0 <= 5 {
-                            eprintln!("[rpc] slot={} http_error: {}", slot, e);
+                        (p, trade.output_token.amount, true)
+                    } else {
+                        continue;
+                    };
+                    if sol_price > 0.0 && sol_amount > 0.0 {
+                        total_trades += 1;
+                        let entry = slot_ohlcv.entry(slot).or_insert_with(|| SlotOhlcv {
+                            block_time,
+                            ..Default::default()
+                        });
+                        entry.sol_usd_prices.push(sol_price);
+                        entry.volume += sol_amount;
+                        entry.num_trades += 1;
+                        if is_buy {
+                            entry.buy_volume += sol_amount;
+                        } else {
+                            entry.sell_volume += sol_amount;
                         }
                     }
                 }
             }
-        })
-        .buffer_unordered(concurrency);
+        }
 
-    let (slots_done, total_tx, total_trades) = {
-        let mut stream = std::pin::pin!(stream);
-        while stream.next().await.is_some() {}
-        let c = counters.lock().unwrap();
-        (c.0, c.1, c.2)
-    };
+        total_blocks += 1;
+        if last_report.elapsed().as_secs() >= 5 {
+            let elapsed = started.elapsed().as_secs_f64();
+            let rps = total_blocks as f64 / elapsed;
+            eprintln!(
+                "[grpc] blocks={} txns={} trades={} ohlcv={} rps={:.1} elapsed={:.1}s",
+                total_blocks, total_tx, total_trades, slot_ohlcv.len(), rps, elapsed
+            );
+            last_report = std::time::Instant::now();
+        }
+    }
 
     let elapsed = started.elapsed().as_secs_f64();
     eprintln!(
-        "Done. slots={}/{} txns={} trades={} rps={:.1} elapsed={:.1}s",
-        slots_done, total, total_tx, total_trades, slots_done as f64 / elapsed, elapsed
+        "Done. blocks={} txns={} trades={} rps={:.1} elapsed={:.1}s",
+        total_blocks, total_tx, total_trades, total_blocks as f64 / elapsed, elapsed
     );
 
     eprintln!("Writing OHLCV for {} slots...", slot_ohlcv.len());
     let mut csv = vec![
         "slot,block_time,open,high,low,close,volume,num_trades,buy_volume,sell_volume".to_string(),
     ];
-    let mut out_slots: Vec<u64> = slot_ohlcv.iter().map(|r| *r.key()).collect();
+    let mut out_slots: Vec<u64> = slot_ohlcv.keys().copied().collect();
     out_slots.sort();
     for slot in &out_slots {
-        let data = slot_ohlcv.get(slot).unwrap();
+        let data = &slot_ohlcv[slot];
         if data.sol_usd_prices.is_empty() {
             continue;
         }
@@ -497,7 +408,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .fold(f64::INFINITY, f64::min);
         csv.push(format!(
             "{},{},{},{},{},{},{},{},{},{}",
-            slot, 0, open, high, low, close, data.volume, data.num_trades, data.buy_volume,
+            slot, data.block_time.unwrap_or(0), open, high, low, close, data.volume, data.num_trades, data.buy_volume,
             data.sell_volume
         ));
     }
