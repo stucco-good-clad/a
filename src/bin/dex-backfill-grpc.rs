@@ -140,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("Connecting to {}", endpoint);
     let channel = Endpoint::from_shared(endpoint)?
-        .max_frame_size(64 * 1024 * 1024)
+        .max_frame_size(16 * 1024 * 1024 - 1)
         .connect()
         .await?;
     let mut client = OldFaithfulClient::new(channel)
