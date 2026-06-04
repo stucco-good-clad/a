@@ -7,7 +7,7 @@ message TransactionStatusMeta {
   uint64 fee = 2;
   repeated uint64 pre_balances = 3;
   repeated uint64 post_balances = 4;
-  repeated InnerInstructions inner_instructions = 5;
+  bytes inner_instructions = 5;
   repeated string log_messages = 6;
   repeated TokenBalance pre_token_balances = 7;
   repeated TokenBalance post_token_balances = 8;
@@ -22,17 +22,6 @@ message TransactionError {
   bytes err = 1;
 }
 
-message InnerInstructions {
-  uint32 index = 1;
-  repeated InnerInstruction instructions = 2;
-}
-
-message InnerInstruction {
-  uint32 program_id_index = 1;
-  bytes data = 2;
-  repeated uint32 accounts = 3;
-}
-
 message TokenBalance {
   uint32 account_index = 1;
   string mint = 2;
@@ -41,7 +30,7 @@ message TokenBalance {
 }
 
 message UiTokenAmount {
-  uint64 amount = 1;
+  fixed64 amount = 1;
   uint32 decimals = 2;
   string ui_amount_string = 3;
 }
