@@ -1,5 +1,5 @@
 use futures::stream::StreamExt;
-use solana_sdk::versioned_transaction::VersionedTransaction;
+use solana_sdk::transaction::VersionedTransaction;
 use solana_tx_parser::types::LoadedAddressesInput;
 use solana_tx_parser::{DexParser, ParseConfig, RawInstruction, SolanaTransactionInput, TransactionMetaInput};
 use std::collections::HashMap;
