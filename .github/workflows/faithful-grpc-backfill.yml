@@ -136,11 +136,18 @@ jobs:
           }
           echo "Response: $RESP"
 
+      - name: Compute slot range
+        run: |
+          EPOCH=${{ matrix.epoch }}
+          START_SLOT=$((EPOCH * 432000))
+          END_SLOT=$(((EPOCH + 1) * 432000))
+          echo "START_SLOT=$START_SLOT" >> $GITHUB_ENV
+          echo "END_SLOT=$END_SLOT" >> $GITHUB_ENV
+          echo "Epoch $EPOCH: slots $START_SLOT..$END_SLOT"
+
       - name: Run gRPC DEX backfill
         env:
           FAITHFUL_ENDPOINT: "http://127.0.0.1:8888"
-          START_SLOT: "${{ matrix.epoch * 432000 }}"
-          END_SLOT: "${{ (matrix.epoch + 1) * 432000 }}"
           OUTPUT_DIR: "./output"
         run: |
           ./dex-backfill-grpc
