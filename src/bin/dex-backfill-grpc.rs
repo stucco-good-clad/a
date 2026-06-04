@@ -3,6 +3,7 @@ use solana_tx_parser::{DexParser, ParseConfig, SolanaTransactionInput, Transacti
 use solana_tx_parser::types::LoadedAddressesInput;
 use dashmap::DashMap;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tonic::transport::Endpoint;
 
 pub mod old_faithful {
@@ -383,15 +384,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .buffer_unordered(concurrency);
 
-    let mut stream = std::pin::pin!(stream);
-    while stream.next().await.is_some() {}
-    drop(stream);
-
-    let (slots_done, total_tx, total_trades) = *counters.lock().unwrap();
-    let slot_ohlcv = std::sync::Arc::try_unwrap(slot_ohlcv)
-        .map_err(|_| "slot_ohlcv Arc still has references")?
-        .into_iter()
-        .collect::<HashMap<u64, SlotOhlcv>>();
+    let (slots_done, total_tx, total_trades) = {
+        let mut stream = std::pin::pin!(stream);
+        let mut slots_done = 0u64;
+        let mut total_tx = 0u64;
+        let mut total_trades = 0u64;
+        while let Some(result) = stream.next().await {
+            let _ = result;
+        }
+        let c = counters.lock().unwrap();
+        slots_done = c.0;
+        total_tx = c.1;
+        total_trades = c.2;
+        (slots_done, total_tx, total_trades)
+    };
     eprintln!(
         "Done. slots_done={}, txns={}, trades={}, elapsed={:.1}s",
         slots_done,
@@ -409,11 +415,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "slot,block_time,open,high,low,close,volume,num_trades,buy_volume,sell_volume".to_string(),
     ];
 
-    let mut slots: Vec<u64> = slot_ohlcv.keys().copied().collect();
+    let mut slots: Vec<u64> = slot_ohlcv.iter().map(|r| *r.key()).collect();
     slots.sort();
 
     for slot in &slots {
-        let data = &slot_ohlcv[slot];
+        let data = slot_ohlcv.get(slot).unwrap();
         if data.sol_usd_prices.is_empty() {
             continue;
         }
