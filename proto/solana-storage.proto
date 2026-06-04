@@ -12,8 +12,8 @@ message TransactionStatusMeta {
   repeated TokenBalance pre_token_balances = 7;
   repeated TokenBalance post_token_balances = 8;
   repeated Reward rewards = 9;
-  bytes loaded_writable_addresses = 10;
-  bytes loaded_readonly_addresses = 11;
+  repeated bytes loaded_writable_addresses = 10;
+  repeated bytes loaded_readonly_addresses = 11;
   bytes return_data = 12;
   uint64 compute_units_consumed = 13;
 }
@@ -28,10 +28,6 @@ message InnerInstructions {
 }
 
 message InnerInstruction {
-  CompiledInstruction instruction = 1;
-}
-
-message CompiledInstruction {
   uint32 program_id_index = 1;
   bytes data = 2;
   repeated uint32 accounts = 3;
