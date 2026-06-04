@@ -92,22 +92,10 @@ jobs:
           CID=$(curl -sf "https://files.old-faithful.net/${EPOCH}/epoch-${EPOCH}.cid" | tr -d '[:space:]')
           echo "Epoch $EPOCH CID: $CID"
           BASE="https://files.old-faithful.net/${EPOCH}/epoch-${EPOCH}"
-          cat > "configs/epoch-${EPOCH}.yml" <<EOF
-version: 1
-epoch: ${EPOCH}
-data:
-  car:
-    uri: ${BASE}.car
-indexes:
-  cid_to_offset_and_size:
-    uri: ${BASE}-${CID}-mainnet-cid-to-offset-and-size.index
-  slot_to_cid:
-    uri: ${BASE}-${CID}-mainnet-slot-to-cid.index
-  sig_to_cid:
-    uri: ${BASE}-${CID}-mainnet-sig-to-cid.index
-  sig_exists:
-    uri: ${BASE}-${CID}-mainnet-sig-exists.index
-EOF
+          printf 'version: 1\nepoch: %s\ndata:\n  car:\n    uri: %s.car\nindexes:\n  cid_to_offset_and_size:\n    uri: %s-%s-mainnet-cid-to-offset-and-size.index\n  slot_to_cid:\n    uri: %s-%s-mainnet-slot-to-cid.index\n  sig_to_cid:\n    uri: %s-%s-mainnet-sig-to-cid.index\n  sig_exists:\n    uri: %s-%s-mainnet-sig-exists.index\n' \
+            "$EPOCH" "$BASE" "$BASE" "$CID" "$BASE" "$CID" "$BASE" "$CID" "$BASE" "$CID" \
+            > "configs/epoch-${EPOCH}.yml"
+          cat "configs/epoch-${EPOCH}.yml"
 
       - name: Start faithful-cli RPC server
         run: |
