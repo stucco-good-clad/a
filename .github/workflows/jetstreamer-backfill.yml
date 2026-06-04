@@ -55,7 +55,7 @@ jobs:
       - name: Install Clang 16
         run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 16
-          sudo apt-get update && sudo apt-get install -y gcc-12 g++-12 zlib1g-dev libssl-dev libtool
+          sudo apt-get update && sudo apt-get install -y zlib1g-dev libssl-dev libtool
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-16 100
           echo "LIBCLANG_PATH=/usr/lib/llvm-16/lib" >> $GITHUB_ENV
