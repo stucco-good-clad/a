@@ -62,7 +62,6 @@ tonic = "0.12"
 zip = "2"
 
 [build-dependencies]
-protobuf-src = "1"
 tonic-build = "0.12"
 
 [profile.release]
