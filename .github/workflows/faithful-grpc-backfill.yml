@@ -37,6 +37,8 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Build binary
+        env:
+          RUSTFLAGS: "-C target-cpu=native"
         run: cargo build --release --bin dex-backfill-grpc
 
       - name: Upload binary artifact
@@ -149,6 +151,7 @@ jobs:
         env:
           FAITHFUL_ENDPOINT: "http://127.0.0.1:8888"
           OUTPUT_DIR: "./output"
+          CONCURRENCY: "1000"
         run: |
           ./dex-backfill-grpc
 
