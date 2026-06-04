@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use tonic::transport::Endpoint;
 
 pub mod old_faithful {
-    tonic::include_proto!("OldFaithful");
+    tonic::include_proto!("old_faithful");
 }
 
 use old_faithful::old_faithful_client::OldFaithfulClient;
