@@ -1,0 +1,167 @@
+name: Jetstreamer DEX Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_epoch:
+        description: 'Start epoch (inclusive)'
+        required: true
+        type: number
+      end_epoch:
+        description: 'End epoch (inclusive)'
+        required: true
+        type: number
+      threads:
+        description: 'Firehose threads (default: auto)'
+        required: false
+        default: '2'
+        type: string
+      sequential:
+        description: 'Use sequential mode (recommended for GHA)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CC: clang
+  CXX: clang++
+  LIBCLANG_PATH: /usr/lib/llvm16/lib/libclang.so
+
+jobs:
+  build:
+    name: Build dex-backfill binary
+    runs-on: ubuntu-latest
+    outputs:
+      epochs: ${{ steps.gen_epochs.outputs.epochs }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Rust artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: dex-backfill-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            dex-backfill-${{ runner.os }}-
+
+      - name: Install Clang 16
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 16
+          sudo apt update && sudo apt install -y gcc-13 g++-13 zlib1g-dev libssl-dev libtool
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-16 100
+
+      - name: Build binary
+        run: cargo build --release --bin dex-backfill
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dex-backfill-binary
+          path: target/release/dex-backfill
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Generate epoch list
+        id: gen_epochs
+        run: |
+          START=${{ github.event.inputs.start_epoch }}
+          END=${{ github.event.inputs.end_epoch }}
+          if [ "$START" -gt "$END" ]; then
+            echo "Error: start_epoch ($START) > end_epoch ($END)"
+            exit 1
+          fi
+          COUNT=$((END - START + 1))
+          echo "Processing $COUNT epochs: $START to $END"
+          EPOCHS=$(printf '%s\n' $(seq $START $END) | jq -R . | jq -sc .)
+          echo "epochs=$EPOCHS" >> $GITHUB_OUTPUT
+
+  backfill:
+    name: Epoch ${{ matrix.epoch }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        epoch: ${{ fromJson(needs.build.outputs.epochs) }}
+    steps:
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: dex-backfill-binary
+
+      - name: Make binary executable
+        run: chmod +x dex-backfill
+
+      - name: Create output directory
+        run: mkdir -p output
+
+      - name: Run Jetstreamer DEX backfill
+        env:
+          OUTPUT_DIR: ./output
+          JETSTREAMER_CLICKHOUSE_MODE: 'off'
+          JETSTREAMER_SEQUENTIAL: ${{ github.event.inputs.sequential }}
+          JETSTREAMER_THREADS: ${{ github.event.inputs.threads }}
+          JETSTREAMER_NETWORK_CAPACITY_MB: '1000'
+        run: |
+          ./dex-backfill ${{ matrix.epoch }}
+
+      - name: Count results
+        run: |
+          BLOCKS=$(ls -1 output/*.txt 2>/dev/null | wc -l)
+          echo "Processed $BLOCKS blocks with DEX swaps"
+
+      - name: Upload epoch data
+        uses: actions/upload-artifact@v4
+        with:
+          name: epoch-${{ matrix.epoch }}
+          path: output/
+          retention-days: 7
+          if-no-files-found: warn
+
+  release:
+    name: Archive results
+    needs: backfill
+    runs-on: ubuntu-latest
+    if: success()
+    steps:
+      - name: Download all epoch artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: epoch-*
+          merge-multiple: true
+          path: all-epochs
+
+      - name: Count total blocks
+        run: |
+          BLOCKS=$(find all-epochs -name "*.txt" 2>/dev/null | wc -l)
+          echo "Total blocks with DEX swaps: $BLOCKS"
+
+      - name: Create release zip
+        run: |
+          START=${{ github.event.inputs.start_epoch }}
+          END=${{ github.event.inputs.end_epoch }}
+          ZIPNAME="dex-backfill-${START}-${END}.zip"
+          cd all-epochs
+          zip -r "../${ZIPNAME}" . -x "*.git*"
+          cd ..
+          echo "ZIPNAME=${ZIPNAME}" >> $GITHUB_ENV
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dex-backfill-${{ github.event.inputs.start_epoch }}-${{ github.event.inputs.end_epoch }}
+          name: DEX Backfill ${{ github.event.inputs.start_epoch }}-${{ github.event.inputs.end_epoch }}
+          body: |
+            Jetstreamer DEX backfill for epochs ${{ github.event.inputs.start_epoch }} to ${{ github.event.inputs.end_epoch }}
+          files: ${{ env.ZIPNAME }}
+          fail_on_unmatched_files: false
