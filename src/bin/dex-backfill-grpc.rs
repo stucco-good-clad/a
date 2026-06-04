@@ -262,7 +262,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&output_dir)?;
 
     eprintln!("Connecting to {}", endpoint);
-    let channel = Endpoint::from_shared(endpoint)?.connect().await?;
+    let channel = Endpoint::from_shared(endpoint)?
+        .max_frame_size(16 * 1024 * 1024)
+        .connect()
+        .await?;
     let mut client = OldFaithfulClient::new(channel);
 
     let filter = StreamTransactionsFilter {
