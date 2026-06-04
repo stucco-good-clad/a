@@ -385,6 +385,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut stream = std::pin::pin!(stream);
     while stream.next().await.is_some() {}
+    drop(stream);
 
     let (slots_done, total_tx, total_trades) = *counters.lock().unwrap();
     let slot_ohlcv = std::sync::Arc::try_unwrap(slot_ohlcv)
