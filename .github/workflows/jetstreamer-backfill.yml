@@ -81,6 +81,7 @@ jobs:
     timeout-minutes: 300
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         epoch: ${{ fromJson(needs.build.outputs.epochs) }}
     steps:

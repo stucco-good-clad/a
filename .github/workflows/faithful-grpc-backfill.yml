@@ -1,0 +1,227 @@
+name: Faithful gRPC DEX Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_epoch:
+        description: 'Start epoch (inclusive)'
+        required: true
+        type: number
+      end_epoch:
+        description: 'End epoch (inclusive)'
+        required: true
+        type: number
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  OPENSSL_NO_VENDOR: "1"
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-22.04
+    outputs:
+      epochs: ${{ steps.gen_epochs.outputs.epochs }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libudev-dev clang llvm-dev libclang-dev pkg-config libssl-dev cmake
+
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Build binary
+        run: cargo build --release --bin dex-backfill-grpc
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dex-backfill-grpc-binary
+          path: target/release/dex-backfill-grpc
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Generate epoch list
+        id: gen_epochs
+        run: |
+          START=${{ github.event.inputs.start_epoch }}
+          END=${{ github.event.inputs.end_epoch }}
+          if [ "$START" -gt "$END" ]; then
+            echo "Error: start_epoch ($START) > end_epoch ($END)"
+            exit 1
+          fi
+          COUNT=$((END - START + 1))
+          echo "Processing $COUNT epochs: $START to $END"
+          EPOCHS=$(printf '%s\n' $(seq $START $END) | jq -R . | jq -sc .)
+          echo "epochs=$EPOCHS" >> $GITHUB_OUTPUT
+
+  backfill:
+    name: Epoch ${{ matrix.epoch }}
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        epoch: ${{ fromJson(needs.build.outputs.epochs) }}
+    steps:
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: dex-backfill-grpc-binary
+
+      - name: Make binary executable
+        run: chmod +x dex-backfill-grpc
+
+      - name: Download faithful-cli
+        run: |
+          curl -sL "https://github.com/rpcpool/yellowstone-faithful/releases/download/v0.7.24/faithful-cli_linux_amd64" -o faithful-cli
+          chmod +x faithful-cli
+
+      - name: Generate faithful-cli config
+        run: |
+          mkdir -p configs
+          EPOCH=${{ matrix.epoch }}
+          CID=$(curl -sf "https://files.old-faithful.net/${EPOCH}/epoch-${EPOCH}.cid" | tr -d '[:space:]')
+          echo "Epoch $EPOCH CID: $CID"
+          BASE="https://files.old-faithful.net/${EPOCH}/epoch-${EPOCH}"
+          cat > "configs/epoch-${EPOCH}.yml" <<EOF
+version: 1
+epoch: ${EPOCH}
+data:
+  car:
+    uri: ${BASE}.car
+indexes:
+  cid_to_offset_and_size:
+    uri: ${BASE}-${CID}-mainnet-cid-to-offset-and-size.index
+  slot_to_cid:
+    uri: ${BASE}-${CID}-mainnet-slot-to-cid.index
+  sig_to_cid:
+    uri: ${BASE}-${CID}-mainnet-sig-to-cid.index
+  sig_exists:
+    uri: ${BASE}-${CID}-mainnet-sig-exists.index
+EOF
+
+      - name: Start faithful-cli RPC server
+        run: |
+          mkdir -p output
+          ./faithful-cli rpc \
+            --listen=:8888 \
+            --epoch-load-concurrency=1 \
+            configs/ > faithful.log 2>&1 &
+          FAITHFUL_PID=$!
+          echo "FAITHFUL_PID=$FAITHFUL_PID" >> $GITHUB_ENV
+
+          echo "Waiting for faithful-cli to load indexes (may take several minutes)..."
+          for i in $(seq 1 180); do
+            if ! kill -0 $FAITHFUL_PID 2>/dev/null; then
+              echo "ERROR: faithful-cli died! Last 50 lines of log:"
+              tail -50 faithful.log
+              exit 1
+            fi
+            if curl -sf http://127.0.0.1:8888 -X POST -H "Content-Type: application/json" \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getFirstAvailableBlock"}' 2>/dev/null | grep -q "result"; then
+              echo "faithful-cli is ready! (took ~$((i * 5))s)"
+              break
+            fi
+            if [ $((i % 12)) -eq 0 ]; then
+              echo "  Still loading... ($((i * 5))s elapsed)"
+              tail -3 faithful.log
+            fi
+            sleep 5
+          done
+
+          # Final verification
+          RESP=$(curl -sf http://127.0.0.1:8888 -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"getFirstAvailableBlock"}' 2>&1) || {
+            echo "ERROR: faithful-cli not responding after wait"
+            tail -20 faithful.log
+            exit 1
+          }
+          echo "Response: $RESP"
+
+      - name: Run gRPC DEX backfill
+        env:
+          FAITHFUL_ENDPOINT: "http://127.0.0.1:8888"
+          START_SLOT: "${{ matrix.epoch * 432000 }}"
+          END_SLOT: "${{ (matrix.epoch + 1) * 432000 }}"
+          OUTPUT_DIR: "./output"
+        run: |
+          ./dex-backfill-grpc
+
+      - name: Stop faithful-cli
+        if: always()
+        run: |
+          if [ -n "$FAITHFUL_PID" ]; then
+            kill $FAITHFUL_PID 2>/dev/null || true
+          fi
+
+      - name: Count results
+        run: |
+          if [ -f output/ohlcv.csv ]; then
+            LINES=$(wc -l < output/ohlcv.csv)
+            echo "OHLCV rows: $((LINES - 1))"
+          else
+            echo "No OHLCV output found"
+          fi
+
+      - name: Upload epoch data
+        uses: actions/upload-artifact@v4
+        with:
+          name: epoch-${{ matrix.epoch }}
+          path: output/
+          retention-days: 7
+          if-no-files-found: warn
+
+  release:
+    name: Archive results
+    needs: backfill
+    runs-on: ubuntu-22.04
+    if: success()
+    steps:
+      - name: Download all epoch artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: epoch-*
+          merge-multiple: true
+          path: all-epochs
+
+      - name: Merge OHLCV CSVs
+        run: |
+          mkdir -p merged
+          echo "slot,block_time,open,high,low,close,volume,num_trades,buy_volume,sell_volume" > merged/ohlcv.csv
+          for f in all-epochs/ohlcv.csv; do
+            if [ -f "$f" ]; then
+              tail -n +2 "$f" >> merged/ohlcv.csv
+            fi
+          done
+          TOTAL=$(wc -l < merged/ohlcv.csv)
+          echo "Total OHLCV rows: $((TOTAL - 1))"
+
+      - name: Create release zip
+        run: |
+          START=${{ github.event.inputs.start_epoch }}
+          END=${{ github.event.inputs.end_epoch }}
+          ZIPNAME="faithful-dex-${START}-${END}.zip"
+          cd merged
+          zip -r "../${ZIPNAME}" .
+          cd ..
+          echo "ZIPNAME=${ZIPNAME}" >> $GITHUB_ENV
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: faithful-dex-${{ github.event.inputs.start_epoch }}-${{ github.event.inputs.end_epoch }}
+          name: Faithful DEX Backfill ${{ github.event.inputs.start_epoch }}-${{ github.event.inputs.end_epoch }}
+          body: |
+            gRPC DEX backfill using Old Faithful for epochs ${{ github.event.inputs.start_epoch }} to ${{ github.event.inputs.end_epoch }}
+          files: ${{ env.ZIPNAME }}
+          fail_on_unmatched_files: false

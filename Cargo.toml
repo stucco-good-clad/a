@@ -31,6 +31,10 @@ path = "src/bin/find-orbitflare-keys.rs"
 name = "dex-backfill"
 path = "src/bin/dex-backfill.rs"
 
+[[bin]]
+name = "dex-backfill-grpc"
+path = "src/bin/dex-backfill-grpc.rs"
+
 [dependencies]
 bs58 = "0.5"
 chrono = "0.4"
@@ -39,8 +43,11 @@ clickhouse = "0.14"
 const-hex = "1"
 csv = "1"
 dashmap = "6"
+futures = "0.3"
 jetstreamer = "0.6"
 memmap2 = "0.9"
+prost = "0.13"
+prost-types = "0.13"
 rand = "0.8"
 rayon = "1"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
@@ -51,7 +58,12 @@ solana-message = "3"
 solana-transaction-status = "3"
 solana-tx-parser = "0.1"
 tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
 zip = "2"
+
+[build-dependencies]
+protobuf-src = "1"
+tonic-build = "0.12"
 
 [profile.release]
 opt-level = 3
