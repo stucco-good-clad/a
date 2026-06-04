@@ -265,8 +265,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = OldFaithfulClient::new(channel);
 
     let filter = StreamTransactionsFilter {
-        vote: Some(false),
-        failed: None,
+        vote: false,
+        failed: false,
         account_include: DEX_PROGRAMS.iter().map(|s| s.to_string()).collect(),
         account_exclude: vec![],
         account_required: vec![],
@@ -277,7 +277,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let response = client
         .stream_transactions(StreamTransactionsRequest {
             start_slot,
-            end_slot: Some(end_slot),
+            end_slot,
             filter: Some(filter),
         })
         .await?
