@@ -24,7 +24,7 @@ const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
 const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const USDT_MINT: &str = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct EnrichedBlock {
     #[serde(rename = "blockhash")]
     blockhash: String,
@@ -36,7 +36,7 @@ struct EnrichedBlock {
     transactions: Vec<EnrichedTransaction>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct EnrichedTransaction {
     #[serde(rename = "transaction")]
     transaction: SimpleTransaction,
@@ -44,7 +44,7 @@ struct EnrichedTransaction {
     meta: TransactionMeta,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct SimpleTransaction {
     #[serde(rename = "message")]
     message: SimpleMessage,
@@ -52,7 +52,7 @@ struct SimpleTransaction {
     signatures: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct SimpleMessage {
     #[serde(rename = "accountKeys")]
     account_keys: Vec<String>,
@@ -62,7 +62,7 @@ struct SimpleMessage {
     recent_blockhash: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct SimpleInstruction {
     #[serde(rename = "programIdIndex")]
     program_id_index: u8,
@@ -72,7 +72,7 @@ struct SimpleInstruction {
     data: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct TransactionMeta {
     #[serde(rename = "fee")]
     fee: u64,
@@ -90,7 +90,7 @@ struct TransactionMeta {
     post_token_balances: Vec<TokenBalance>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct InnerInstructionSet {
     #[serde(rename = "index")]
     index: u8,
@@ -98,7 +98,7 @@ struct InnerInstructionSet {
     instructions: Vec<SimpleInstruction>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct TokenBalance {
     #[serde(rename = "accountIndex")]
     account_index: u8,
@@ -110,7 +110,7 @@ struct TokenBalance {
     owner: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct UiTokenAmount {
     #[serde(rename = "amount")]
     amount: String,
