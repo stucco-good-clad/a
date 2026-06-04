@@ -191,29 +191,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             total_tx += 1;
             match bincode::deserialize::<VersionedTransaction>(&tx.transaction) {
                 Ok(versioned_tx) => {
-                    if let Some((input, account_keys)) = convert_to_solana_input(slot, block_time, &versioned_tx) {
-                        let has_dex = account_keys.iter().any(|k| DEX_PROGRAMS.iter().any(|p| *p == k.as_str()));
-                        if has_dex {
-                            dex_hit += 1;
-                        }
-                        if !has_dex {
+                    if let Some((input, _account_keys)) = convert_to_solana_input(slot, block_time, &versioned_tx) {
+                        let outer_dex = input.instructions.iter().any(|i| {
+                            input.account_keys.get(i.program_id_index as usize)
+                                .map(|k| DEX_PROGRAMS.iter().any(|p| *p == k.as_str()))
+                                .unwrap_or(false)
+                        });
+                        if !outer_dex {
                             continue;
                         }
+                        dex_hit += 1;
                         let mut cfg = ParseConfig::default();
                         cfg.program_ids = Some(DEX_PROGRAMS.iter().map(|p| p.to_string()).collect());
                         let trades = dex_parser.parse_trades(&input, Some(cfg));
-                        if dex_hit <= 3 && !trades.is_empty() {
-                            eprintln!("[dex] slot={} trades={} first trade: in={} out={}",
+                        if dex_hit <= 5 {
+                            eprintln!("[dex] slot={} trades={} outer_progs={:?}",
                                 slot, trades.len(),
-                                trades[0].input_token.mint,
-                                trades[0].output_token.mint);
-                        }
-                        if dex_hit <= 3 && trades.is_empty() {
-                            let outer_progs: Vec<String> = input.instructions.iter().map(|i| {
-                                account_keys.get(i.program_id_index as usize).cloned().unwrap_or_default()
-                            }).collect();
-                            eprintln!("[dex] slot={} NO trades. outer_programs={:?} account_keys_count={}",
-                                slot, outer_progs, account_keys.len());
+                                input.instructions.iter().map(|i| {
+                                    input.account_keys.get(i.program_id_index as usize).cloned().unwrap_or_default()
+                                }).collect::<Vec<_>>());
                         }
                         for trade in &trades {
                             let im = &trade.input_token.mint;
