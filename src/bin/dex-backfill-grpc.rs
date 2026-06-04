@@ -2,8 +2,6 @@ use futures::stream::StreamExt;
 use solana_tx_parser::{DexParser, ParseConfig, SolanaTransactionInput, TransactionMetaInput, RawInstruction};
 use solana_tx_parser::types::LoadedAddressesInput;
 use dashmap::DashMap;
-use std::collections::HashMap;
-use std::sync::Arc;
 use tonic::transport::Endpoint;
 
 pub mod old_faithful {
@@ -363,6 +361,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         c.0 += 1;
                         c.1 += local_tx;
                         c.2 += local_trades;
+                        if c.0 <= 3 {
+                            eprintln!("[grpc] slot={} txns={} block_time={:?}", s, local_tx, block_time);
+                        }
 
                         let mut lr = last_report.lock().unwrap();
                         if lr.elapsed().as_secs() >= 5 {
@@ -375,9 +376,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             *lr = std::time::Instant::now();
                         }
                     }
-                    Err(_e) => {
+                    Err(e) => {
                         let mut c = counters.lock().unwrap();
                         c.0 += 1;
+                        if c.0 <= 5 {
+                            eprintln!("[grpc] slot={} error: {}", slot, e);
+                        }
                     }
                 }
             }
@@ -386,17 +390,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (slots_done, total_tx, total_trades) = {
         let mut stream = std::pin::pin!(stream);
-        let mut slots_done = 0u64;
-        let mut total_tx = 0u64;
-        let mut total_trades = 0u64;
-        while let Some(result) = stream.next().await {
-            let _ = result;
-        }
+        while stream.next().await.is_some() {}
         let c = counters.lock().unwrap();
-        slots_done = c.0;
-        total_tx = c.1;
-        total_trades = c.2;
-        (slots_done, total_tx, total_trades)
+        (c.0, c.1, c.2)
     };
     eprintln!(
         "Done. slots_done={}, txns={}, trades={}, elapsed={:.1}s",
