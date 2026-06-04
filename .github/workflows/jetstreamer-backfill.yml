@@ -28,9 +28,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  CC: clang
-  CXX: clang++
-  LIBCLANG_PATH: /usr/lib/llvm-16/lib
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  OPENSSL_NO_VENDOR: "1"
 
 jobs:
   build:
@@ -41,24 +41,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache Rust artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: dex-backfill-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            dex-backfill-${{ runner.os }}-
-
-      - name: Install Clang 16
+      - name: Dependencies
         run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 16
-          sudo apt-get update && sudo apt-get install -y zlib1g-dev libssl-dev libtool
-          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100
-          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-16 100
-          echo "LIBCLANG_PATH=/usr/lib/llvm-16/lib" >> $GITHUB_ENV
+          sudo apt-get update
+          sudo apt-get install -y build-essential libudev-dev clang llvm-dev libclang-dev pkg-config libssl-dev
+
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Build binary
         run: cargo build --release --bin dex-backfill
