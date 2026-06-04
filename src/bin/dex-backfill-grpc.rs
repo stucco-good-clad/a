@@ -1,5 +1,6 @@
 use futures::stream::StreamExt;
-use solana_tx_parser::{DexParser, ParseConfig, SolanaTransactionInput, TransactionMetaInput, RawInstruction, LoadedAddressesInput};
+use solana_tx_parser::{DexParser, ParseConfig, SolanaTransactionInput, TransactionMetaInput, RawInstruction};
+use solana_tx_parser::types::LoadedAddressesInput;
 use std::collections::HashMap;
 use tonic::transport::Endpoint;
 
@@ -69,7 +70,7 @@ fn parse_transaction(tx_bytes: &[u8]) -> Option<ParsedTx> {
     let mut off = 0;
 
     let num_sigs = read_compact_u16(msg_bytes, &mut off) as usize;
-    let mut end_of_sigs = off + num_sigs * 64;
+    let end_of_sigs = off + num_sigs * 64;
     if end_of_sigs > msg_bytes.len() {
         return None;
     }
