@@ -9,7 +9,7 @@ pub mod old_faithful {
 }
 
 use old_faithful::old_faithful_client::OldFaithfulClient;
-use old_faithful::{StreamTransactionsRequest, StreamTransactionsFilter};
+use old_faithful::{StreamBlocksRequest, StreamBlocksFilter};
 
 const DEX_PROGRAMS: &[&str] = &[
     "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
@@ -268,18 +268,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let mut client = OldFaithfulClient::new(channel);
 
-    let filter = StreamTransactionsFilter {
-        vote: false,
-        failed: false,
+    let filter = StreamBlocksFilter {
         account_include: DEX_PROGRAMS.iter().map(|s| s.to_string()).collect(),
-        account_exclude: vec![],
-        account_required: vec![],
     };
 
-    eprintln!("Streaming DEX transactions {}..{}", start_slot, end_slot);
+    eprintln!("Streaming DEX blocks {}..{}", start_slot, end_slot);
 
     let response = client
-        .stream_transactions(StreamTransactionsRequest {
+        .stream_blocks(StreamBlocksRequest {
             start_slot,
             end_slot,
             filter: Some(filter),
@@ -295,63 +291,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut stream = response;
     while let Some(result) = stream.next().await {
-        let msg = result?;
-        let resp = match msg.transaction {
-            Some(t) => t,
-            None => continue,
-        };
-        let slot = msg.slot;
-        let block_time = if msg.block_time != 0 {
-            Some(msg.block_time)
+        let block = result?;
+        let slot = block.slot;
+        let block_time = if block.block_time != 0 {
+            Some(block.block_time)
         } else {
             None
         };
 
-        if let Some(input) = build_solana_input(slot, block_time, &resp.transaction) {
-            let mut cfg = ParseConfig::default();
-            cfg.program_ids = Some(DEX_PROGRAMS.iter().map(|s| s.to_string()).collect());
+        for tx in &block.transactions {
+            if let Some(input) = build_solana_input(slot, block_time, &tx.transaction) {
+                let mut cfg = ParseConfig::default();
+                cfg.program_ids = Some(DEX_PROGRAMS.iter().map(|s| s.to_string()).collect());
 
-            let trades = dex_parser.parse_trades(&input, Some(cfg));
+                let trades = dex_parser.parse_trades(&input, Some(cfg));
 
-            for trade in &trades {
-                let input_mint = &trade.input_token.mint;
-                let output_mint = &trade.output_token.mint;
+                for trade in &trades {
+                    let input_mint = &trade.input_token.mint;
+                    let output_mint = &trade.output_token.mint;
 
-                let (sol_price, sol_amount, is_buy) = if is_sol(input_mint) && is_stablecoin(output_mint)
-                {
-                    let price = if trade.input_token.amount > 0.0 {
-                        trade.output_token.amount / trade.input_token.amount
+                    let (sol_price, sol_amount, is_buy) = if is_sol(input_mint) && is_stablecoin(output_mint)
+                    {
+                        let price = if trade.input_token.amount > 0.0 {
+                            trade.output_token.amount / trade.input_token.amount
+                        } else {
+                            0.0
+                        };
+                        (price, trade.input_token.amount, false)
+                    } else if is_stablecoin(input_mint) && is_sol(output_mint) {
+                        let price = if trade.output_token.amount > 0.0 {
+                            trade.input_token.amount / trade.output_token.amount
+                        } else {
+                            0.0
+                        };
+                        (price, trade.output_token.amount, true)
                     } else {
-                        0.0
+                        continue;
                     };
-                    (price, trade.input_token.amount, false)
-                } else if is_stablecoin(input_mint) && is_sol(output_mint) {
-                    let price = if trade.output_token.amount > 0.0 {
-                        trade.input_token.amount / trade.output_token.amount
-                    } else {
-                        0.0
-                    };
-                    (price, trade.output_token.amount, true)
-                } else {
-                    continue;
-                };
 
-                if sol_price > 0.0 && sol_amount > 0.0 {
-                    total_trades += 1;
-                    let entry = slot_ohlcv.entry(slot).or_default();
-                    entry.sol_usd_prices.push(sol_price);
-                    entry.volume += sol_amount;
-                    entry.num_trades += 1;
-                    if is_buy {
-                        entry.buy_volume += sol_amount;
-                    } else {
-                        entry.sell_volume += sol_amount;
+                    if sol_price > 0.0 && sol_amount > 0.0 {
+                        total_trades += 1;
+                        let entry = slot_ohlcv.entry(slot).or_default();
+                        entry.sol_usd_prices.push(sol_price);
+                        entry.volume += sol_amount;
+                        entry.num_trades += 1;
+                        if is_buy {
+                            entry.buy_volume += sol_amount;
+                        } else {
+                            entry.sell_volume += sol_amount;
+                        }
                     }
                 }
             }
+
+            total_tx += 1;
         }
 
-        total_tx += 1;
         if last_report.elapsed().as_secs() >= 5 {
             eprintln!(
                 "[grpc] txns={}, trades={}, slots={}, elapsed={:.1}s",
