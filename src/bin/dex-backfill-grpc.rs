@@ -1,22 +1,10 @@
+use base64::Engine;
 use futures::stream::{self, StreamExt};
-use prost::Message as ProstMessage;
+use serde_json::{json, Value};
 use solana_sdk::transaction::VersionedTransaction;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tonic::transport::Endpoint;
-
-pub mod old_faithful {
-    tonic::include_proto!("old_faithful");
-}
-
-pub mod solana_meta {
-    include!(concat!(env!("OUT_DIR"), "/solana_storage.rs"));
-}
-
-use old_faithful::old_faithful_client::OldFaithfulClient;
-use old_faithful::BlockRequest;
-use solana_meta::TransactionStatusMeta;
 
 const DEX_PROGRAMS: &[&str] = &[
     "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
@@ -37,6 +25,10 @@ fn bs58_encode(bytes: &[u8]) -> String {
     bs58::encode(bytes).into_string()
 }
 
+fn is_dex_program(key: &str) -> bool {
+    DEX_PROGRAMS.iter().any(|p| *p == key)
+}
+
 #[derive(Debug, Default)]
 struct SlotOhlcv {
     block_time: Option<i64>,
@@ -47,17 +39,56 @@ struct SlotOhlcv {
     sol_usd_prices: Vec<f64>,
 }
 
-fn process_block(block: &old_faithful::BlockResponse) -> Vec<(u64, Option<i64>, f64, f64, bool)> {
-    let slot = block.slot;
-    let block_time = if block.block_time != 0 {
-        Some(block.block_time)
-    } else {
-        None
+fn process_rpc_block(slot: u64, block: &Value) -> Vec<(u64, Option<i64>, f64, f64, bool)> {
+    let block_time = block.get("blockTime").and_then(|v| v.as_i64());
+    let transactions = match block.get("transactions").and_then(|v| v.as_array()) {
+        Some(t) => t,
+        None => return Vec::new(),
     };
+
     let mut trades = Vec::new();
 
-    for tx in &block.transactions {
-        let versioned_tx = match bincode::deserialize::<VersionedTransaction>(&tx.transaction) {
+    for tx in transactions {
+        let meta = match tx.get("meta") {
+            Some(m) => m,
+            None => continue,
+        };
+
+        if meta.get("err").is_some() && !meta.get("err").unwrap().is_null() {
+            continue;
+        }
+
+        let tx_data = match tx.get("transaction").and_then(|v| v.as_array()) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        if tx_data.is_empty() {
+            continue;
+        }
+
+        let msg_b64 = match tx_data[0].as_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let msg_bytes = match base64::engine::general_purpose::STANDARD.decode(msg_b64) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        let num_sigs = tx_data.len() - 1;
+        let mut raw_tx = Vec::with_capacity(8 + num_sigs * 64 + msg_bytes.len());
+        raw_tx.extend_from_slice(&(num_sigs as u64).to_le_bytes());
+        for i in 1..tx_data.len() {
+            if let Some(sig_b64) = tx_data[i].as_str() {
+                if let Ok(sig) = base64::engine::general_purpose::STANDARD.decode(sig_b64) {
+                    raw_tx.extend_from_slice(&sig);
+                }
+            }
+        }
+        raw_tx.extend_from_slice(&msg_bytes);
+
+        let versioned_tx = match bincode::deserialize::<VersionedTransaction>(&raw_tx) {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -76,13 +107,13 @@ fn process_block(block: &old_faithful::BlockResponse) -> Vec<(u64, Option<i64>, 
             VersionedMessage::Legacy(m) => m.instructions.iter().any(|i| {
                 account_keys
                     .get(i.program_id_index as usize)
-                    .map(|k| DEX_PROGRAMS.iter().any(|p| *p == k.as_str()))
+                    .map(is_dex_program)
                     .unwrap_or(false)
             }),
             VersionedMessage::V0(m) => m.instructions.iter().any(|i| {
                 account_keys
                     .get(i.program_id_index as usize)
-                    .map(|k| DEX_PROGRAMS.iter().any(|p| *p == k.as_str()))
+                    .map(is_dex_program)
                     .unwrap_or(false)
             }),
         };
@@ -90,56 +121,72 @@ fn process_block(block: &old_faithful::BlockResponse) -> Vec<(u64, Option<i64>, 
             continue;
         }
 
-        if tx.meta.is_empty() {
-            continue;
-        }
-        let meta = match TransactionStatusMeta::decode(&tx.meta[..]) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        if meta.err.is_some() {
-            continue;
-        }
-
         let signer = match account_keys.first() {
             Some(k) => k.clone(),
             None => continue,
         };
-        let fee = meta.fee;
-        let pre_sol = meta.pre_balances.first().copied().unwrap_or(0);
-        let post_sol = meta.post_balances.first().copied().unwrap_or(0);
+
+        let fee = meta.get("fee").and_then(|v| v.as_u64()).unwrap_or(0);
+        let pre_balances = meta.get("preBalances").and_then(|v| v.as_array());
+        let post_balances = meta.get("postBalances").and_then(|v| v.as_array());
+
+        let pre_sol = pre_balances
+            .and_then(|b| b.first())
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let post_sol = post_balances
+            .and_then(|b| b.first())
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let native_sol_change: i128 = post_sol as i128 - pre_sol as i128;
+
+        let pre_token = meta.get("preTokenBalances").and_then(|v| v.as_array());
+        let post_token = meta.get("postTokenBalances").and_then(|v| v.as_array());
 
         let mut wsol_change: i128 = 0;
         let mut usdc_change: i128 = 0;
         let mut usdt_change: i128 = 0;
 
-        for post_bal in &meta.post_token_balances {
-            if post_bal.owner != signer {
-                continue;
-            }
-            let pre_amount: i128 = meta
-                .pre_token_balances
-                .iter()
-                .find(|p| p.account_index == post_bal.account_index)
-                .and_then(|p| p.ui_token_amount.as_ref())
-                .map(|a| a.amount as i128)
-                .unwrap_or(0);
-            let post_amount: i128 = post_bal
-                .ui_token_amount
-                .as_ref()
-                .map(|a| a.amount as i128)
-                .unwrap_or(0);
-            let change = post_amount - pre_amount;
-            if change == 0 {
-                continue;
-            }
-            match post_bal.mint.as_str() {
-                SOL_MINT => wsol_change += change,
-                USDC_MINT => usdc_change += change,
-                USDT_MINT => usdt_change += change,
-                _ => {}
+        if let Some(post_balances) = post_token {
+            for post_bal in post_balances {
+                let owner = post_bal.get("owner").and_then(|v| v.as_str()).unwrap_or("");
+                if owner != signer {
+                    continue;
+                }
+                let account_index = post_bal.get("accountIndex").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mint = post_bal.get("mint").and_then(|v| v.as_str()).unwrap_or("");
+
+                let post_amount: i128 = post_bal
+                    .get("uiTokenAmount")
+                    .and_then(|u| u.get("amount"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+
+                let pre_amount: i128 = pre_token
+                    .and_then(|pre| {
+                        pre.iter().find(|p| {
+                            p.get("accountIndex").and_then(|v| v.as_u64()) == Some(account_index)
+                        })
+                    })
+                    .and_then(|p| {
+                        p.get("uiTokenAmount")
+                            .and_then(|u| u.get("amount"))
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse().ok())
+                    })
+                    .unwrap_or(0);
+
+                let change = post_amount - pre_amount;
+                if change == 0 {
+                    continue;
+                }
+                match mint {
+                    SOL_MINT => wsol_change += change,
+                    USDC_MINT => usdc_change += change,
+                    USDT_MINT => usdt_change += change,
+                    _ => {}
+                }
             }
         }
 
@@ -162,8 +209,8 @@ fn process_block(block: &old_faithful::BlockResponse) -> Vec<(u64, Option<i64>, 
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let endpoint = std::env::var("FAITHFUL_ENDPOINT")
-        .unwrap_or_else(|_| "http://127.0.0.1:8889".to_string());
+    let rpc_url = std::env::var("FAITHFUL_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:8888".to_string());
     let start_slot: u64 = std::env::var("START_SLOT")
         .unwrap_or_else(|_| "345600000".to_string())
         .parse()?;
@@ -177,19 +224,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(&output_dir)?;
 
-    let mut clients = Vec::new();
-    for _ in 0..concurrency {
-        let ch = Endpoint::from_shared(endpoint.clone())?
-            .max_frame_size(16 * 1024 * 1024 - 1)
-            .connect()
-            .await?;
-        clients.push(
-            OldFaithfulClient::new(ch).max_decoding_message_size(64 * 1024 * 1024),
-        );
-    }
+    let http = reqwest::Client::builder()
+        .pool_max_idle_per_host(concurrency)
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
 
     eprintln!(
-        "Fetching blocks {}..{} with {} concurrent GetBlock calls",
+        "Fetching blocks {}..{} via JSON-RPC GetBlock with {} concurrent requests",
         start_slot, end_slot, concurrency
     );
 
@@ -200,49 +241,79 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut found_txns = 0u64;
     let mut found_trades = 0u64;
     let mut not_found = 0u64;
+    let mut meta_errs = 0u64;
     let started = std::time::Instant::now();
+
+    let rpc_url = Arc::new(rpc_url);
+    let http = Arc::new(http);
 
     let slots: Vec<u64> = (start_slot..end_slot).collect();
 
     let mut results = stream::iter(slots)
-        .enumerate()
-        .map(|(i, slot)| {
-            let client_ref = &clients[i % clients.len()];
-            let mut client = client_ref.clone();
+        .map(|slot| {
+            let url = rpc_url.clone();
+            let client = http.clone();
             async move {
-                let result = client.get_block(BlockRequest { slot }).await;
-                (slot, result)
+                let body = json!({
+                    "jsonrpc": "2.0",
+                    "id": slot,
+                    "method": "getBlock",
+                    "params": [
+                        slot,
+                        {
+                            "encoding": "base64",
+                            "transactionDetails": "full",
+                            "maxSupportedTransactionVersion": 0,
+                            "rewards": false
+                        }
+                    ]
+                });
+
+                let resp = client.post(url.as_ref()).json(&body).send().await;
+                (slot, resp)
             }
         })
         .buffer_unordered(concurrency);
 
-    while let Some((slot, result)) = results.next().await {
+    while let Some((slot, resp)) = results.next().await {
         processed += 1;
 
-        match result {
-            Ok(resp) => {
-                let block = resp.into_inner();
-                if block.transactions.is_empty() {
+        match resp {
+            Ok(r) => {
+                let json: Value = r.json().await.unwrap_or(Value::Null);
+                if let Some(error) = json.get("error") {
                     not_found += 1;
-                } else {
-                    found_blocks += 1;
-                    found_txns += block.transactions.len() as u64;
-                    let trades = process_block(&block);
-                    found_trades += trades.len() as u64;
-                    for (s, bt, price, sol_amount, is_buy) in &trades {
-                        let entry = slot_ohlcv.entry(*s).or_insert_with(|| SlotOhlcv {
-                            block_time: *bt,
-                            ..Default::default()
-                        });
-                        entry.sol_usd_prices.push(*price);
-                        entry.volume += sol_amount;
-                        entry.num_trades += 1;
-                        if *is_buy {
-                            entry.buy_volume += sol_amount;
-                        } else {
-                            entry.sell_volume += sol_amount;
+                    let _ = error;
+                } else if let Some(result) = json.get("result") {
+                    if result.is_null() {
+                        not_found += 1;
+                    } else {
+                        found_blocks += 1;
+                        let trades = process_rpc_block(slot, result);
+                        let tx_count = result
+                            .get("transactions")
+                            .and_then(|v| v.as_array())
+                            .map(|a| a.len() as u64)
+                            .unwrap_or(0);
+                        found_txns += tx_count;
+                        found_trades += trades.len() as u64;
+                        for (s, bt, price, sol_amount, is_buy) in &trades {
+                            let entry = slot_ohlcv.entry(*s).or_insert_with(|| SlotOhlcv {
+                                block_time: *bt,
+                                ..Default::default()
+                            });
+                            entry.sol_usd_prices.push(*price);
+                            entry.volume += sol_amount;
+                            entry.num_trades += 1;
+                            if *is_buy {
+                                entry.buy_volume += sol_amount;
+                            } else {
+                                entry.sell_volume += sol_amount;
+                            }
                         }
                     }
+                } else {
+                    meta_errs += 1;
                 }
             }
             Err(_) => {
@@ -250,10 +321,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        if processed % 5000 == 0 || processed == total_slots {
+        if processed % 1000 == 0 || processed == total_slots {
             let elapsed = started.elapsed().as_secs_f64();
             eprintln!(
-                "[getblock] {}/{} slots ({:.0}%) blocks={} txns={} trades={} ohlcv={} not_found={} slots_per_s={:.0} elapsed={:.0}s",
+                "[rpc] {}/{} ({:.0}%) blocks={} txns={} trades={} ohlcv={} not_found={} slots/s={:.0} elapsed={:.0}s",
                 processed, total_slots, processed as f64 / total_slots as f64 * 100.0,
                 found_blocks, found_txns, found_trades, slot_ohlcv.len(), not_found,
                 processed as f64 / elapsed, elapsed
@@ -263,9 +334,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let elapsed = started.elapsed().as_secs_f64();
     eprintln!(
-        "Done. slots={} blocks={} txns={} trades={} ohlcv={} not_found={} slots_per_s={:.0} elapsed={:.0}s",
+        "Done. slots={} blocks={} txns={} trades={} ohlcv={} not_found={} err={} slots/s={:.0} elapsed={:.0}s",
         total_slots, found_blocks, found_txns, found_trades, slot_ohlcv.len(),
-        not_found, total_slots as f64 / elapsed, elapsed
+        not_found, meta_errs, total_slots as f64 / elapsed, elapsed
     );
 
     let mut csv = vec![

@@ -151,9 +151,9 @@ jobs:
           echo "END_SLOT=$END_SLOT" >> $GITHUB_ENV
           echo "Epoch $EPOCH: slots $START_SLOT..$END_SLOT"
 
-      - name: Run gRPC DEX backfill
+      - name: Run JSON-RPC DEX backfill
         env:
-          FAITHFUL_ENDPOINT: "http://127.0.0.1:8889"
+          FAITHFUL_ENDPOINT: "http://127.0.0.1:8888"
           OUTPUT_DIR: "./output"
         run: |
           ./dex-backfill-grpc
